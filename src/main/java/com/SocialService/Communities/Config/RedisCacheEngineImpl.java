@@ -1,7 +1,6 @@
 package com.SocialService.Communities.Config;
 
 import lombok.RequiredArgsConstructor;
-import org.springframework.context.annotation.Profile;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 import java.util.Collections;
@@ -11,7 +10,6 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 @Component
-@Profile("prod") // 🟢 Instantly turns on when deployed to cloud production systems
 @RequiredArgsConstructor
 public class RedisCacheEngineImpl implements CacheEngine {
 
