@@ -2,7 +2,6 @@ package com.SocialService.Communities.Services;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.annotation.Profile;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -10,7 +9,6 @@ import java.util.HashMap;
 import java.util.Map;
 
 @Service
-@Profile("prod") // 🟢 Active ONLY when deployed to the cloud
 @RequiredArgsConstructor
 @Slf4j
 public class RedisProfileCacheServiceImpl implements ProfileCacheService {
