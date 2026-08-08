@@ -1,5 +1,5 @@
 server:
-  port: 8092
+  port: ${PORT:8092}
 
 spring:
   application:
@@ -65,12 +65,6 @@ ghost:
 # ========================================================
 eureka:
   client:
-    service-url:
-      defaultZone: http://localhost:8761/eureka/
-    register-with-eureka: true
-    fetch-registry: true
-  instance:
-    prefer-ip-address: false
-    hostname: localhost
-    instance-id: ${spring.application.name}:${server.port}
-    lease-renewal-interval-in-seconds: 5
+    enabled: false
+    register-with-eureka: false
+    fetch-registry: false
