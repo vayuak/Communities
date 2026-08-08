@@ -37,7 +37,7 @@ spring:
       timeout: 5000ms
 
   # ========================================================
-  # 📁 FILE STORAGE MAXIMUM BOUNDS
+  # 📁 FILE STORAGE MAXIMUM BOUNDS.
   # ========================================================
   servlet:
     multipart:
