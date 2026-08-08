@@ -1,5 +1,5 @@
 server:
-  port: 8092         # ✅ Clear high port assignment for Social Service
+  port: 8092
 
 spring:
   application:
@@ -8,13 +8,13 @@ spring:
     allow-bean-definition-overriding: true
 
   # ========================================================
-  # 🐘 LIVE PERSISTENT STORAGE: POSTGRESQL LAYER
+  # 🐘 LIVE PERSISTENT STORAGE: POSTGRESQL LAYER (RAILWAY READY)
   # ========================================================
   datasource:
-    url: jdbc:postgresql://localhost:5432/ghost_social?createDatabaseIfNotExist=true
+    url: ${SPRING_DATASOURCE_URL}
     driver-class-name: org.postgresql.Driver
-    username: postgres
-    password: root       # ⚠️ Double-check this string matches your PostgreSQL password!
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
 
   jpa:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
@@ -27,13 +27,22 @@ spring:
         format_sql: true
 
   # ========================================================
-  # 📥 LIVE DISTRIBUTED MEMORY STORAGE: DESKTOP REDIS MATRIX
+  # 📥 LIVE DISTRIBUTED MEMORY STORAGE: REDIS (RAILWAY READY)
   # ========================================================
   data:
     redis:
-      host: 127.0.0.1    # ✅ Forces explicit loopback binding instead of local resolution
-      port: 6379         # ⚠️ CHANGE THIS to match the exact port shown inside your Desktop App!
-      timeout: 5000ms    # Extends the safety connection buffer threshold window
+      host: ${SPRING_REDIS_HOST}
+      port: ${SPRING_REDIS_PORT}
+      password: ${SPRING_REDIS_PASSWORD}
+      timeout: 5000ms
+
+  # ========================================================
+  # 📁 FILE STORAGE MAXIMUM BOUNDS
+  # ========================================================
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
 
   # ========================================================
   # 🤖 BACKGROUND ANALYSIS PIPELINE EXCLUSIONS
@@ -43,6 +52,13 @@ spring:
       enabled: false
     ollama:
       enabled: false
+
+# ========================================================
+# 🛡️ SECURITY TOKENS (PREVENTS STARTUP CRASHES)
+# ========================================================
+ghost:
+  shield:
+    jwt-secret: ${JWT_SECRET}
 
 # ========================================================
 # 🗺️ SERVICE REGISTRY MAPPING ENGINE (EUREKA)
