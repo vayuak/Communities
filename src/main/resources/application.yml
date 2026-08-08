@@ -61,7 +61,7 @@ ghost:
     jwt-secret: ${JWT_SECRET}
 
 # ========================================================
-# 🗺️ SERVICE REGISTRY MAPPING ENGINE (EUREKA)
+# 🗺️ SERVICE REGISTRY MAPPING ENGINE (EUREKA.)
 # ========================================================
 eureka:
   client:
