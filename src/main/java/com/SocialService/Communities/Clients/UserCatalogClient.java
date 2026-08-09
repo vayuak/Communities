@@ -9,7 +9,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import java.util.List;
 import java.util.Map;
 
-@FeignClient(name = "USER-CATALOG-SERVICE", path = "/api/users", configuration = FeignInterceptorConfig.class)
+@FeignClient(name = "USER-CATALOG-SERVICE",url = "${user.catalog.service.url}", path = "/api/users", configuration = FeignInterceptorConfig.class)
 public interface UserCatalogClient {
 
     @GetMapping("/internal/search-owners")
