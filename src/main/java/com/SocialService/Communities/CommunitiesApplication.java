@@ -10,7 +10,6 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 @Slf4j
 @EnableCaching
-@EnableDiscoveryClient
 @EnableFeignClients
 @SpringBootApplication
 @EnableScheduling
