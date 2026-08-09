@@ -72,12 +72,12 @@ eureka:
 user:
   catalog:
     service:
-      url: ${USER_SERVICE_URL}
+      url: ${USER_SERVICE_URL:https://usercatalog-production-2fcc.up.railway.app}
 
 blob:
   service:
-    url: ${BLOB_URL}
+    url: ${BLOB_URL:https://blob-production-a5a8.up.railway.app}
 
 p2p:
   service:
-    url: ${P2P_URL}
+    url: ${P2P_URL:wss://p2p-service-production-70d9.up.railway.app}
