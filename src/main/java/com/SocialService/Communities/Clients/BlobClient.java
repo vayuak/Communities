@@ -6,8 +6,8 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import java.util.Map;
 
-// Connects directly to your VaultController in the BLOB service
-@FeignClient(name = "BLOB", path = "/api/vault", configuration = FeignInterceptorConfig.class)
+// Connects directly to VaultController in the BLOB service
+@FeignClient(name = "BLOB", url = "${blob.service.url}",path = "/api/vault", configuration = FeignInterceptorConfig.class)
 public interface BlobClient {
 
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)

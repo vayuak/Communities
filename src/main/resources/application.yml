@@ -68,8 +68,16 @@ eureka:
     enabled: false
     register-with-eureka: false
     fetch-registry: false
+# Direct networking routes (Bypassing Eureka)
 user:
   catalog:
     service:
-      # 🟢 Uses the Railway env var, or falls back to the public URL
-      url: ${USER_SERVICE_URL:https://usercatalog-production-2fcc.up.railway.app}
+      url: ${USER_SERVICE_URL}
+
+blob:
+  service:
+    url: ${BLOB_URL}
+
+p2p:
+  service:
+    url: ${P2P_URL}
