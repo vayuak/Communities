@@ -1,6 +1,5 @@
 package com.SocialService.Communities.Services;
 
-import com.SocialService.Communities.Clients.UserClient;
 import com.SocialService.Communities.DTOs.CommentResponseDTO;
 import com.SocialService.Communities.Models.*;
 import com.SocialService.Communities.Repositories.*;
@@ -10,7 +9,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,10 +28,7 @@ public class SocialServiceImpl implements SocialService {
     private final PeerVouchRepository peerVouchRepository;
 
     private final RedisTemplate<String, Object> redisTemplate;
-    private final SimpMessagingTemplate messagingTemplate;
     private final ProfileCacheService profileCacheService;
-    private final UserClient userClient;
-
     // ==========================================
     // 🌍 CORE SUBMISSION ENGINE & FEED MANAGEMENT
     // ==========================================
