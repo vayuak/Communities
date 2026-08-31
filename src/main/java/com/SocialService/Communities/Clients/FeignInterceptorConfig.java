@@ -1,4 +1,4 @@
-package com.SocialService.Communities.Clients; // Update package if in a different service
+package com.SocialService.Communities.Clients;
 
 import feign.RequestInterceptor;
 import feign.codec.Encoder;
@@ -13,16 +13,20 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class FeignInterceptorConfig {
 
-    private static final String SHIELD_HEADER = "X-Ghost-Shield-Key";
-
-    // 🟢 SECURE PRACTICE: Pulling from environment, no hardcoded fallbacks
+    // 🟢 SECURE PRACTICE: Pulling both keys from the environment
     @Value("${ghost.shield.key}")
     private String shieldSecret;
 
+    @Value("${ghost.gateway.secret}")
+    private String gatewaySecret;
+
     @Bean
     public RequestInterceptor gatewayShieldInterceptor() {
-        // Automatically injects secure signatures into outbound microservice loops using the environment variable
-        return requestTemplate -> requestTemplate.header(SHIELD_HEADER, shieldSecret);
+        return requestTemplate -> {
+            // 🟢 CORRECT HEADERS: Injects both signatures so target services allow access
+            requestTemplate.header("X-Ghost-Shield-Key", shieldSecret);
+            requestTemplate.header("X-Gateway-Secret", gatewaySecret);
+        };
     }
 
     @Bean
