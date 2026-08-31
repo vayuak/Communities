@@ -5,6 +5,7 @@ import io.jsonwebtoken.security.Keys;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 
@@ -12,8 +13,8 @@ import java.nio.charset.StandardCharsets;
 @Slf4j
 public class JwtUtils {
 
-    // 🟢 CRITICAL DECOUPLING KEY: Matches the secret token key inside UserCatalogService
-    @Value("${ghost.shield.jwt-secret:SuperSecurePermanentSecretKeyThatIsAtLeast64BytesLongForSecurityGuarantees}")
+    // 🟢 CRITICAL DECOUPLING KEY: Strict enforcement, no hardcoded fallbacks
+    @Value("${ghost.shield.jwt-secret}")
     private String jwtSecret;
 
     private SecretKey getSigningKey() {
