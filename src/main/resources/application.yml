@@ -1,24 +1,20 @@
 server:
-  port: ${PORT:8092}
+  port: ${PORT}
   compression:
     enabled: true
     mime-types: application/json,text/html,text/xml,text/plain
     min-response-size: 1024
+
 spring:
   application:
     name: SOCIAL-SERVICE
   main:
     allow-bean-definition-overriding: true
-
-  # ========================================================
-  # 🐘 LIVE PERSISTENT STORAGE: POSTGRESQL LAYER (RAILWAY READY)
-  # ========================================================
   datasource:
     url: ${SPRING_DATASOURCE_URL}
     driver-class-name: org.postgresql.Driver
     username: ${SPRING_DATASOURCE_USERNAME}
     password: ${SPRING_DATASOURCE_PASSWORD}
-
   jpa:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
     hibernate:
@@ -28,59 +24,43 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
         format_sql: true
-
-  # ========================================================
-  # 📥 LIVE DISTRIBUTED MEMORY STORAGE: REDIS (RAILWAY READY)
-  # ========================================================
   data:
     redis:
       host: ${SPRING_REDIS_HOST}
       port: ${SPRING_REDIS_PORT}
       password: ${SPRING_REDIS_PASSWORD}
       timeout: 5000ms
-
-  # ========================================================
-  # 📁 FILE STORAGE MAXIMUM BOUNDS.
-  # ========================================================
   servlet:
     multipart:
       max-file-size: 100MB
       max-request-size: 100MB
-
-  # ========================================================
-  # 🤖 BACKGROUND ANALYSIS PIPELINE EXCLUSIONS
-  # ========================================================
   ai:
     openai:
       enabled: false
     ollama:
       enabled: false
 
-# ========================================================
-# 🛡️ SECURITY TOKENS (PREVENTS STARTUP CRASHES)
-# ========================================================
 ghost:
   shield:
     jwt-secret: ${JWT_SECRET}
 
-# ========================================================
-# 🗺️ SERVICE REGISTRY MAPPING ENGINE (EUREKA.)
-# ========================================================
 eureka:
   client:
     enabled: false
     register-with-eureka: false
     fetch-registry: false
-# Direct networking routes (Bypassing Eureka)
+
 user:
   catalog:
     service:
-      url: ${USER_SERVICE_URL:https://usercatalog-production-2fcc.up.railway.app}
+      name: ${USER_CATALOG_SERVICE_NAME}
+      url: ${USER_CATALOG_SERVICE_URL}
 
 blob:
   service:
-    url: ${BLOB_URL:https://blob-production-a5a8.up.railway.app}
+    name: ${BLOB_SERVICE_NAME}
+    url: ${BLOB_SERVICE_URL}
 
 p2p:
   service:
-    url: ${P2P_URL:wss://p2p-service-production-70d9.up.railway.app}
+    url: ${P2P_URL}
