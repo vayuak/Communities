@@ -6,6 +6,8 @@ import com.SocialService.Communities.Repositories.*;
 import com.SocialService.Communities.DTOs.FeedPostDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -29,6 +31,7 @@ public class SocialServiceImpl implements SocialService {
 
     private final RedisTemplate<String, Object> redisTemplate;
     private final ProfileCacheService profileCacheService;
+
     // ==========================================
     // 🌍 CORE SUBMISSION ENGINE & FEED MANAGEMENT
     // ==========================================
@@ -79,7 +82,6 @@ public class SocialServiceImpl implements SocialService {
         return rawPosts.map(post -> {
             Map<String, String> authorProfile = profileCacheService.getUserProfileSummary(post.getUserId());
 
-            // 🟢 FIXED: Actually check the DB sets to sync state with React Native
             String userVote = "NONE";
             if (post.getUpvotes() != null && post.getUpvotes().contains(currentUserId)) {
                 userVote = "up";
@@ -100,11 +102,12 @@ public class SocialServiceImpl implements SocialService {
                     .mediaType(post.getMediaType())
                     .score(post.getScore())
                     .commentCount(post.getCommentCount())
-                    .currentUserVote(userVote) // Now perfectly synced!
+                    .currentUserVote(userVote)
                     .createdAt(post.getCreatedAt())
                     .build();
         });
     }
+
     @Override
     public Page<FeedPostDTO> getPersonalTimeline(Long targetUserId, Pageable pageable, Long currentUserId) {
         Page<Post> rawPosts = postRepository.findByUserIdOrderByCreatedAtDesc(targetUserId, pageable);
@@ -112,7 +115,6 @@ public class SocialServiceImpl implements SocialService {
         return rawPosts.map(post -> {
             Map<String, String> authorProfile = profileCacheService.getUserProfileSummary(post.getUserId());
 
-            // 🟢 FIXED: Lowercase and Null-Safe
             String userVote = "NONE";
             if (post.getUpvotes() != null && post.getUpvotes().contains(currentUserId)) {
                 userVote = "up";
@@ -133,7 +135,7 @@ public class SocialServiceImpl implements SocialService {
                     .mediaType(post.getMediaType())
                     .score(post.getScore())
                     .commentCount(post.getCommentCount())
-                    .currentUserVote(userVote) // Perfectly synced!
+                    .currentUserVote(userVote)
                     .createdAt(post.getCreatedAt())
                     .build();
         });
@@ -159,8 +161,10 @@ public class SocialServiceImpl implements SocialService {
         return "Vote registered. Score: " + post.getScore();
     }
 
+    // 🟢 EVICTS STALE COMMENT CACHE FOR LEGACY COMMENT DISPATCH
     @Override
     @Transactional
+    @CacheEvict(value = "post_comments", key = "#comment.postId")
     public Comment addComment(Comment comment, Long userId) {
         comment.setUserId(userId);
         Comment savedComment = commentRepository.save(comment);
@@ -174,11 +178,10 @@ public class SocialServiceImpl implements SocialService {
         return savedComment;
     }
 
-
-
-
+    // 🟢 EVICTS TRUST STATUS CACHE FOR TARGET USER WHEN VOUCHED
     @Override
     @Transactional
+    @CacheEvict(value = "trust_network", key = "#targetUserId")
     public String castPeerVouch(Long voucherId, Long targetUserId, String location) {
         if (voucherId.equals(targetUserId)) throw new RuntimeException("Self-vouching invalid.");
         if (peerVouchRepository.existsByVoucherIdAndTargetUserId(voucherId, targetUserId)) {
@@ -196,14 +199,14 @@ public class SocialServiceImpl implements SocialService {
         return "Vouch recorded. Total: " + totalVouches + "/3";
     }
 
+    // 🟢 CACHES TRUST STATUS SUMMARY
     @Override
+    @Cacheable(value = "trust_network", key = "#userId")
     public Map<String, Object> getTrustNetworkStatus(Long userId) {
         long count = peerVouchRepository.countByTargetUserId(userId);
         Map<String, String> profile = profileCacheService.getUserProfileSummary(userId);
         return Map.of("vouchCount", count, "isVerifiedResident", profile.getOrDefault("isVerifiedResident", "false"));
     }
-
-
 
     @Override
     public void registerUserPublicKey(Long userId, String publicKeyBase64) {
@@ -225,7 +228,6 @@ public class SocialServiceImpl implements SocialService {
         return rawPosts.map(post -> {
             Map<String, String> authorProfile = profileCacheService.getUserProfileSummary(post.getUserId());
 
-            // 🟢 FIXED: Lowercase and Null-Safe
             String userVote = "NONE";
             if (post.getUpvotes() != null && post.getUpvotes().contains(currentUserId)) {
                 userVote = "up";
@@ -246,7 +248,7 @@ public class SocialServiceImpl implements SocialService {
                     .mediaType(post.getMediaType())
                     .score(post.getScore())
                     .commentCount(post.getCommentCount())
-                    .currentUserVote(userVote) // Perfectly synced!
+                    .currentUserVote(userVote)
                     .createdAt(post.getCreatedAt())
                     .build();
         });
@@ -261,8 +263,10 @@ public class SocialServiceImpl implements SocialService {
         postRepository.save(post);
     }
 
+    // 🟢 EVICTS STALE COMMENT CACHE WHEN A NEW SECURE COMMENT IS ADDED
     @Override
     @Transactional
+    @CacheEvict(value = "post_comments", key = "#postId")
     public Comment addSecureComment(Long postId, Long userId, String content, Long parentId) {
         Post post = postRepository.findById(postId)
                 .orElseThrow(() -> new RuntimeException("Target post does not exist."));
@@ -281,15 +285,16 @@ public class SocialServiceImpl implements SocialService {
 
         return savedComment;
     }
+
     // ==========================================
     // 💬 COMMENT FETCHING & NESTING LOGIC
     // ==========================================
+    // 🟢 CACHES THE ENTIRE NESTED COMMENT TREE BY POST ID
     @Override
+    @Cacheable(value = "post_comments", key = "#postId")
     public List<CommentResponseDTO> getPostComments(Long postId) {
-        // 1. Fetch all raw comments for the post (Assuming you have this in CommentRepository)
         List<Comment> rawComments = commentRepository.findByPostIdOrderByCreatedAtAsc(postId);
 
-        // 2. Map to DTO and enrich with User Profile Data
         List<CommentResponseDTO> mappedComments = rawComments.stream().map(comment -> {
             Map<String, String> authorProfile = profileCacheService.getUserProfileSummary(comment.getUserId());
 
@@ -303,15 +308,12 @@ public class SocialServiceImpl implements SocialService {
                     .build();
         }).collect(Collectors.toList());
 
-        // 3. 🟢 NESTING ALGORITHM: Sort so children immediately follow their parents
         List<CommentResponseDTO> sortedNestingList = new ArrayList<>();
 
         for (CommentResponseDTO parent : mappedComments) {
-            // If it's a top-level comment
             if (parent.getParentId() == null) {
                 sortedNestingList.add(parent);
 
-                // Immediately find and append any replies to this specific parent
                 for (CommentResponseDTO child : mappedComments) {
                     if (parent.getId().equals(child.getParentId())) {
                         sortedNestingList.add(child);
@@ -322,5 +324,4 @@ public class SocialServiceImpl implements SocialService {
 
         return sortedNestingList;
     }
-
 }

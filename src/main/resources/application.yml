@@ -8,6 +8,10 @@ server:
 spring:
   application:
     name: SOCIAL-SERVICE
+  cache:
+    type: redis
+    redis:
+      time-to-live: 3600000
   main:
     allow-bean-definition-overriding: true
   datasource:
@@ -43,12 +47,6 @@ spring:
 ghost:
   shield:
     jwt-secret: ${JWT_SECRET}
-
-eureka:
-  client:
-    enabled: false
-    register-with-eureka: false
-    fetch-registry: false
 
 user:
   catalog:
