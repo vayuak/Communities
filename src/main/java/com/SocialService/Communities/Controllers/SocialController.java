@@ -126,16 +126,6 @@ public class SocialController {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
         }
     }
-
-    @PostMapping("/post/{postId}/comment")
-    public ResponseEntity<?> addSecureComment(@PathVariable Long postId, @Valid @RequestBody com.SocialService.Communities.DTOs.CommentRequestDTO request, @RequestAttribute("userId") Long userId) {
-        try {
-            return ResponseEntity.status(HttpStatus.CREATED).body(socialService.addSecureComment(postId, userId, request.getContent(), request.getParentId()));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
-        }
-    }
-
     @GetMapping("/feed")
     public ResponseEntity<List<Map<String, Object>>> getCityFeed(@RequestParam String city, @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "10") int size) {
         String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE LOWER(city_name) = LOWER(?) ORDER BY created_at DESC LIMIT ? OFFSET ?";
@@ -274,23 +264,38 @@ public class SocialController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
         }
     }
+    @PostMapping("/post/{postId}/comment")
+    public ResponseEntity<?> addSecureComment(
+            @PathVariable Long postId,
+            @Valid @RequestBody com.SocialService.Communities.DTOs.CommentRequestDTO request,
+            @RequestAttribute("userId") Long userId) {
+        try {
+            // 🟢 Pass the userId to socialService
+            com.SocialService.Communities.Models.Comment savedComment =
+                    socialService.addSecureComment(postId, userId, request.getContent(), request.getParentId());
+
+            return ResponseEntity.status(HttpStatus.CREATED).body(savedComment);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
+        }
+    }
 
     @GetMapping("/post/{postId}/comments")
     public ResponseEntity<List<com.SocialService.Communities.DTOs.CommentResponseDTO>> getComments(@PathVariable Long postId) {
-        // 🟢 FIX: Select only columns that actually exist in comments table
+        // 🟢 Query comments table safely
         String sql = "SELECT id, content, parent_id, created_at, user_id FROM comments WHERE post_id = ? ORDER BY created_at ASC";
         try {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, postId);
 
-            // Extract unique userIds to resolve handles and DPs
             Set<Long> uniqueUserIds = rows.stream()
                     .map(r -> ((Number) r.get("user_id")).longValue())
                     .collect(Collectors.toSet());
 
+            // Resolve each user's true handle and profile picture from User Catalog
             Map<Long, Map<String, String>> userMetadataMap = new HashMap<>();
             for (Long uid : uniqueUserIds) {
                 try {
-                    // Query User Catalog by ID or handle
+                    // 🟢 Call User Catalog endpoint by User ID or Handle
                     List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(String.valueOf(uid));
                     if (remoteUser != null && !remoteUser.isEmpty()) {
                         Map<String, String> meta = new HashMap<>();
@@ -310,14 +315,16 @@ public class SocialController {
                 Object parentObj = row.get("parent_id");
                 Object createdObj = row.get("created_at");
 
-                Map<String, String> userMeta = userMetadataMap.getOrDefault(commentUserId, Map.of("username", "Anonymous", "avatarUrl", ""));
+                Map<String, String> userMeta = userMetadataMap.get(commentUserId);
+                String commentUsername = (userMeta != null && userMeta.get("username") != null) ? userMeta.get("username") : "User_" + commentUserId;
+                String commentAvatarUrl = (userMeta != null) ? userMeta.get("avatarUrl") : null;
 
                 com.SocialService.Communities.DTOs.CommentResponseDTO dto = com.SocialService.Communities.DTOs.CommentResponseDTO.builder()
                         .id(((Number) row.get("id")).longValue())
                         .parentId(parentObj != null ? ((Number) parentObj).longValue() : null)
                         .content((String) row.get("content"))
-                        .username(userMeta.get("username"))
-                        .avatarUrl(userMeta.get("avatarUrl"))
+                        .username(commentUsername)
+                        .avatarUrl(commentAvatarUrl)
                         .createdAt(createdObj != null ? ((java.sql.Timestamp) createdObj).toLocalDateTime() : null)
                         .build();
                 allComments.add(dto);
@@ -345,48 +352,55 @@ public class SocialController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
         }
     }
-
     @GetMapping("/user/{username}/full-profile")
     public ResponseEntity<?> getFullProfile(@PathVariable String username) {
         Map<String, Object> response = new HashMap<>();
-        // 🟢 FIX: Handle both handles with '@' and clean strings
+        // 🟢 FIX 1: Strip '@' and aggressively trim whitespace to prevent routing mismatches
         String cleanUsername = username.replace("@", "").trim().toLowerCase();
 
         try {
             Map<String, Object> safeProfile = new HashMap<>();
+            String liveAvatarUrl = null;
+
             try {
                 List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanUsername);
                 if (remoteUser != null && !remoteUser.isEmpty()) {
                     safeProfile = new HashMap<>(remoteUser.get(0));
+                    liveAvatarUrl = (String) safeProfile.get("profilePictureUrl");
                 }
             } catch (Exception e) {
                 log.warn("Feign user catalog lookup failed for {}: {}", cleanUsername, e.getMessage());
             }
 
+            // 🟢 FIX 2: Fallback profile state instead of returning HTTP 404
             if (safeProfile.isEmpty()) {
                 safeProfile.put("username", cleanUsername);
                 safeProfile.put("profilePictureUrl", null);
             }
 
-            safeProfile.put("avatarUrl", safeProfile.get("profilePictureUrl"));
+            safeProfile.put("avatarUrl", liveAvatarUrl);
             response.put("profile", safeProfile);
 
+            // Fetch all posts authored by this handle in social_db
             String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
                     "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", city_name AS \"cityName\" " +
                     "FROM posts WHERE LOWER(username) = LOWER(?) ORDER BY created_at DESC";
 
             List<Map<String, Object>> userPosts = jdbcTemplate.queryForList(sql, cleanUsername);
-            String liveAvatarUrl = (String) safeProfile.get("profilePictureUrl");
+
+            final String finalAvatar = liveAvatarUrl;
             userPosts.forEach(post -> {
-                post.put("avatarUrl", liveAvatarUrl);
+                post.put("avatarUrl", finalAvatar);
                 post.put("username", cleanUsername);
             });
 
             response.put("posts", userPosts);
             return ResponseEntity.ok(response);
+
         } catch (Exception e) {
             log.error("Profile aggregation failed for {}: {}", cleanUsername, e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Failed to aggregate profile: " + e.getMessage()));
         }
     }
 }
