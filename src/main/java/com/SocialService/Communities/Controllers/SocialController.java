@@ -223,65 +223,6 @@ public class SocialController {
         }
     }
 
-    @GetMapping("/post/{postId}/comments")
-    public ResponseEntity<List<com.SocialService.Communities.DTOs.CommentResponseDTO>> getComments(@PathVariable Long postId) {
-        // 🟢 FIX: PostgreSQL aliases are strictly avoided here. Retrieving exact raw database column names prevents the 500 NullPointerException.
-        String sql = "SELECT id, content, parent_id, created_at, user_id, username FROM comments WHERE post_id = ? ORDER BY created_at ASC";
-        try {
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, postId);
-
-            Set<String> uniqueUsernames = rows.stream().map(r -> (String) r.get("username")).filter(u -> u != null).collect(Collectors.toSet());
-            Map<String, String> avatarMap = new HashMap<>();
-            for (String uname : uniqueUsernames) {
-                try {
-                    List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
-                    if (remoteUser != null && !remoteUser.isEmpty()) avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
-                } catch (Exception ignored) {}
-            }
-
-            List<com.SocialService.Communities.DTOs.CommentResponseDTO> allComments = new java.util.ArrayList<>();
-            Map<Long, List<com.SocialService.Communities.DTOs.CommentResponseDTO>> childrenMap = new java.util.HashMap<>();
-            List<com.SocialService.Communities.DTOs.CommentResponseDTO> rootComments = new java.util.ArrayList<>();
-
-            for (Map<String, Object> row : rows) {
-                String rowUser = (String) row.get("username");
-                Object parentObj = row.get("parent_id");
-                Object createdObj = row.get("created_at");
-
-                com.SocialService.Communities.DTOs.CommentResponseDTO dto = com.SocialService.Communities.DTOs.CommentResponseDTO.builder()
-                        .id(((Number) row.get("id")).longValue())
-                        .parentId(parentObj != null ? ((Number) parentObj).longValue() : null)
-                        .content((String) row.get("content"))
-                        .username(rowUser)
-                        .avatarUrl(avatarMap.get(rowUser))
-                        .createdAt(createdObj != null ? ((java.sql.Timestamp) createdObj).toLocalDateTime() : null)
-                        .build();
-                allComments.add(dto);
-
-                if (dto.getParentId() == null) rootComments.add(dto);
-                else childrenMap.computeIfAbsent(dto.getParentId(), k -> new java.util.ArrayList<>()).add(dto);
-            }
-
-            List<com.SocialService.Communities.DTOs.CommentResponseDTO> sortedNestingList = new java.util.ArrayList<>();
-            java.util.Stack<com.SocialService.Communities.DTOs.CommentResponseDTO> stack = new java.util.Stack<>();
-
-            for (int i = rootComments.size() - 1; i >= 0; i--) stack.push(rootComments.get(i));
-
-            while (!stack.isEmpty()) {
-                com.SocialService.Communities.DTOs.CommentResponseDTO current = stack.pop();
-                sortedNestingList.add(current);
-                List<com.SocialService.Communities.DTOs.CommentResponseDTO> children = childrenMap.get(current.getId());
-                if (children != null) {
-                    for (int i = children.size() - 1; i >= 0; i--) stack.push(children.get(i));
-                }
-            }
-            return ResponseEntity.ok(sortedNestingList);
-        } catch (Exception e) {
-            log.error("Failed to fetch comments: {}", e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
-        }
-    }
-
     @DeleteMapping("/post/{postId}/delete")
     public ResponseEntity<?> purgePostRecord(@PathVariable Long postId, @RequestAttribute("userId") Long userId) {
         try {
@@ -334,26 +275,117 @@ public class SocialController {
         }
     }
 
+    @GetMapping("/post/{postId}/comments")
+    public ResponseEntity<List<com.SocialService.Communities.DTOs.CommentResponseDTO>> getComments(@PathVariable Long postId) {
+        // 🟢 FIX: Select only columns that actually exist in comments table
+        String sql = "SELECT id, content, parent_id, created_at, user_id FROM comments WHERE post_id = ? ORDER BY created_at ASC";
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, postId);
+
+            // Extract unique userIds to resolve handles and DPs
+            Set<Long> uniqueUserIds = rows.stream()
+                    .map(r -> ((Number) r.get("user_id")).longValue())
+                    .collect(Collectors.toSet());
+
+            Map<Long, Map<String, String>> userMetadataMap = new HashMap<>();
+            for (Long uid : uniqueUserIds) {
+                try {
+                    // Query User Catalog by ID or handle
+                    List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(String.valueOf(uid));
+                    if (remoteUser != null && !remoteUser.isEmpty()) {
+                        Map<String, String> meta = new HashMap<>();
+                        meta.put("username", (String) remoteUser.get(0).get("username"));
+                        meta.put("avatarUrl", (String) remoteUser.get(0).get("profilePictureUrl"));
+                        userMetadataMap.put(uid, meta);
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            List<com.SocialService.Communities.DTOs.CommentResponseDTO> allComments = new java.util.ArrayList<>();
+            Map<Long, List<com.SocialService.Communities.DTOs.CommentResponseDTO>> childrenMap = new java.util.HashMap<>();
+            List<com.SocialService.Communities.DTOs.CommentResponseDTO> rootComments = new java.util.ArrayList<>();
+
+            for (Map<String, Object> row : rows) {
+                Long commentUserId = ((Number) row.get("user_id")).longValue();
+                Object parentObj = row.get("parent_id");
+                Object createdObj = row.get("created_at");
+
+                Map<String, String> userMeta = userMetadataMap.getOrDefault(commentUserId, Map.of("username", "Anonymous", "avatarUrl", ""));
+
+                com.SocialService.Communities.DTOs.CommentResponseDTO dto = com.SocialService.Communities.DTOs.CommentResponseDTO.builder()
+                        .id(((Number) row.get("id")).longValue())
+                        .parentId(parentObj != null ? ((Number) parentObj).longValue() : null)
+                        .content((String) row.get("content"))
+                        .username(userMeta.get("username"))
+                        .avatarUrl(userMeta.get("avatarUrl"))
+                        .createdAt(createdObj != null ? ((java.sql.Timestamp) createdObj).toLocalDateTime() : null)
+                        .build();
+                allComments.add(dto);
+
+                if (dto.getParentId() == null) rootComments.add(dto);
+                else childrenMap.computeIfAbsent(dto.getParentId(), k -> new java.util.ArrayList<>()).add(dto);
+            }
+
+            List<com.SocialService.Communities.DTOs.CommentResponseDTO> sortedNestingList = new java.util.ArrayList<>();
+            java.util.Stack<com.SocialService.Communities.DTOs.CommentResponseDTO> stack = new java.util.Stack<>();
+
+            for (int i = rootComments.size() - 1; i >= 0; i--) stack.push(rootComments.get(i));
+
+            while (!stack.isEmpty()) {
+                com.SocialService.Communities.DTOs.CommentResponseDTO current = stack.pop();
+                sortedNestingList.add(current);
+                List<com.SocialService.Communities.DTOs.CommentResponseDTO> children = childrenMap.get(current.getId());
+                if (children != null) {
+                    for (int i = children.size() - 1; i >= 0; i--) stack.push(children.get(i));
+                }
+            }
+            return ResponseEntity.ok(sortedNestingList);
+        } catch (Exception e) {
+            log.error("Failed to fetch comments: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
+        }
+    }
+
     @GetMapping("/user/{username}/full-profile")
     public ResponseEntity<?> getFullProfile(@PathVariable String username) {
         Map<String, Object> response = new HashMap<>();
-        String cleanUsername = username.trim().toLowerCase();
+        // 🟢 FIX: Handle both handles with '@' and clean strings
+        String cleanUsername = username.replace("@", "").trim().toLowerCase();
 
         try {
-            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanUsername);
-            if (remoteUser != null && !remoteUser.isEmpty()) {
-                Map<String, Object> safeProfile = new HashMap<>(remoteUser.get(0));
-                safeProfile.put("avatarUrl", safeProfile.get("profilePictureUrl"));
-                response.put("profile", safeProfile);
-            } else return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "User untraceable."));
+            Map<String, Object> safeProfile = new HashMap<>();
+            try {
+                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanUsername);
+                if (remoteUser != null && !remoteUser.isEmpty()) {
+                    safeProfile = new HashMap<>(remoteUser.get(0));
+                }
+            } catch (Exception e) {
+                log.warn("Feign user catalog lookup failed for {}: {}", cleanUsername, e.getMessage());
+            }
 
-            List<Map<String, Object>> userPosts = jdbcTemplate.queryForList("SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", city_name AS \"cityName\" FROM posts WHERE username = ? ORDER BY created_at DESC", cleanUsername);
-            String liveAvatarUrl = (String) remoteUser.get(0).get("profilePictureUrl");
-            userPosts.forEach(post -> { post.put("avatarUrl", liveAvatarUrl); post.put("username", cleanUsername); });
+            if (safeProfile.isEmpty()) {
+                safeProfile.put("username", cleanUsername);
+                safeProfile.put("profilePictureUrl", null);
+            }
+
+            safeProfile.put("avatarUrl", safeProfile.get("profilePictureUrl"));
+            response.put("profile", safeProfile);
+
+            String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
+                    "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", city_name AS \"cityName\" " +
+                    "FROM posts WHERE LOWER(username) = LOWER(?) ORDER BY created_at DESC";
+
+            List<Map<String, Object>> userPosts = jdbcTemplate.queryForList(sql, cleanUsername);
+            String liveAvatarUrl = (String) safeProfile.get("profilePictureUrl");
+            userPosts.forEach(post -> {
+                post.put("avatarUrl", liveAvatarUrl);
+                post.put("username", cleanUsername);
+            });
 
             response.put("posts", userPosts);
             return ResponseEntity.ok(response);
         } catch (Exception e) {
+            log.error("Profile aggregation failed for {}: {}", cleanUsername, e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
         }
     }
