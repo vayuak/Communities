@@ -445,55 +445,6 @@ public class SocialController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
         }
     }
-
-    @GetMapping("/user/{username}/profile")
-    public ResponseEntity<?> getUserProfileData(@PathVariable String username) {
-        try {
-            // Fetch directly from User Catalog instead of local missing DB
-            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(username.trim().toLowerCase());
-            if (remoteUser != null && !remoteUser.isEmpty()) {
-                return ResponseEntity.ok(remoteUser.get(0));
-            }
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "User not found"));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
-        }
-    }
-
-    @GetMapping("/user/{username}/full-profile")
-    public ResponseEntity<?> getFullProfile(@PathVariable String username) {
-        Map<String, Object> response = new HashMap<>();
-
-        try {
-            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(username);
-            if (remoteUser != null && !remoteUser.isEmpty()) {
-                response.put("profile", remoteUser.get(0));
-            } else {
-                return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                        .body(Map.of("error", "User identity untraceable."));
-            }
-            String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
-                    "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", city_name AS \"cityName\" " +
-                    "FROM posts WHERE username = ? ORDER BY created_at DESC";
-
-            List<Map<String, Object>> userPosts = jdbcTemplate.queryForList(sql, username);
-
-            String liveAvatarUrl = (String) remoteUser.get(0).get("profilePictureUrl");
-            userPosts.forEach(post -> {
-                post.put("avatarUrl", liveAvatarUrl);
-                post.put("username", username);
-            });
-
-            response.put("posts", userPosts);
-            return ResponseEntity.ok(response);
-
-        } catch (Exception e) {
-            log.error("Profile aggregation failed for {}: {}", username, e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Failed to aggregate profile vectors."));
-        }
-    }
-
     @DeleteMapping("/post/{postId}/delete")
     public ResponseEntity<?> purgePostRecord(
             @PathVariable Long postId,
@@ -559,6 +510,54 @@ public class SocialController {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Post not found."));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Failed to load post."));
+        }
+    }
+    @GetMapping("/user/{username}/profile")
+    public ResponseEntity<?> getUserProfileData(@PathVariable String username) {
+        try {
+            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(username.trim().toLowerCase());
+            if (remoteUser != null && !remoteUser.isEmpty()) {
+                // 🟢 NORMALIZED: Maps profilePictureUrl to avatarUrl for frontend consistency
+                Map<String, Object> safeProfile = new HashMap<>(remoteUser.get(0));
+                safeProfile.put("avatarUrl", safeProfile.get("profilePictureUrl"));
+                return ResponseEntity.ok(safeProfile);
+            }
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "User not found"));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/user/{username}/full-profile")
+    public ResponseEntity<?> getFullProfile(@PathVariable String username) {
+        Map<String, Object> response = new HashMap<>();
+        try {
+            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(username);
+            if (remoteUser != null && !remoteUser.isEmpty()) {
+                // 🟢 NORMALIZED: Maps profilePictureUrl to avatarUrl for frontend consistency
+                Map<String, Object> safeProfile = new HashMap<>(remoteUser.get(0));
+                safeProfile.put("avatarUrl", safeProfile.get("profilePictureUrl"));
+                response.put("profile", safeProfile);
+            } else {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "User identity untraceable."));
+            }
+
+            String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
+                    "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", city_name AS \"cityName\" " +
+                    "FROM posts WHERE username = ? ORDER BY created_at DESC";
+
+            List<Map<String, Object>> userPosts = jdbcTemplate.queryForList(sql, username);
+            String liveAvatarUrl = (String) remoteUser.get(0).get("profilePictureUrl");
+            userPosts.forEach(post -> {
+                post.put("avatarUrl", liveAvatarUrl);
+                post.put("username", username);
+            });
+
+            response.put("posts", userPosts);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Profile aggregation failed for {}: {}", username, e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Failed to aggregate profile vectors."));
         }
     }
 }
