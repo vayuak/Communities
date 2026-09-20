@@ -69,7 +69,6 @@ public class SocialController {
         }
     }
 
-    // 🟢 FIXED: Moved out of the nested structure and updated to drop LEFT JOIN
     @GetMapping("/search")
     public ResponseEntity<?> searchGlobalScamDatabase(
             @RequestParam String keyword,
@@ -80,7 +79,6 @@ public class SocialController {
         String input = keyword.trim();
         Map<String, Object> targetPayload = new HashMap<>();
 
-        // 1. User Search Pathway
         if (input.startsWith("@") && input.length() > 1) {
             String targetHandle = input.substring(1);
             List<Map<String, Object>> remoteUsers = userCatalogClient.searchUsersByHandle(targetHandle);
@@ -89,7 +87,6 @@ public class SocialController {
             return ResponseEntity.ok(targetPayload);
         }
 
-        // 2. Post Title/Content Search Pathway (FIXED: Dropped LEFT JOIN)
         String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
                 "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", " +
                 "user_id AS \"userId\", username " +
@@ -100,7 +97,6 @@ public class SocialController {
         String searchParam = "%" + input + "%";
         List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, searchParam, searchParam, size, page * size);
 
-        // 3. Extract unique usernames to fetch live avatars
         java.util.Set<String> uniqueUsernames = livePosts.stream()
                 .map(p -> (String) p.get("username"))
                 .collect(java.util.stream.Collectors.toSet());
@@ -117,7 +113,6 @@ public class SocialController {
             }
         }
 
-        // 4. Inject the true avatar into every searched post
         livePosts.forEach(post -> {
             String author = (String) post.get("username");
             post.put("avatarUrl", avatarMap.get(author));
@@ -134,11 +129,11 @@ public class SocialController {
             @RequestBody Map<String, String> body) {
         try {
             String newPic = body.get("profilePictureUrl");
-            jdbcTemplate.update("UPDATE users SET profile_picture_url = ? WHERE id = ?", newPic, userId);
             String profileKey = "user:profile:" + userId;
             if (newPic != null) {
                 redisTemplate.opsForHash().put(profileKey, "avatarUrl", newPic);
             }
+            // 🟢 CRASH FIX: Removed jdbcTemplate.update("UPDATE users...") here
             return ResponseEntity.ok(Map.of("status", "SUCCESS", "message", "Profile picture synchronized successfully."));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
@@ -202,7 +197,6 @@ public class SocialController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
 
-        // 1. Drop the broken LEFT JOIN. Use case-insensitive matching for the city.
         String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
                 "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", " +
                 "user_id AS \"userId\", username " +
@@ -212,12 +206,10 @@ public class SocialController {
 
         List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, city.trim(), size, page * size);
 
-        // 2. Extract unique usernames from the feed
         java.util.Set<String> uniqueUsernames = livePosts.stream()
                 .map(p -> (String) p.get("username"))
                 .collect(java.util.stream.Collectors.toSet());
 
-        // 3. Fetch fresh Avatars dynamically from User Catalog
         Map<String, String> avatarMap = new HashMap<>();
         for (String uname : uniqueUsernames) {
             try {
@@ -230,7 +222,6 @@ public class SocialController {
             }
         }
 
-        // 4. Inject the true avatar into every post
         livePosts.forEach(post -> {
             String author = (String) post.get("username");
             post.put("avatarUrl", avatarMap.get(author));
@@ -245,15 +236,26 @@ public class SocialController {
             @RequestParam(defaultValue = "20") int size,
             @RequestAttribute("userId") Long userId) {
 
-        String sql = "SELECT p.id, p.title, p.content, p.media_url AS \"mediaUrl\", p.media_type AS \"mediaType\", " +
-                "p.score, p.comment_count AS \"commentCount\", p.created_at AS \"createdAt\", " +
-                "p.user_id AS \"userId\", u.username, u.profile_picture_url AS \"avatarUrl\" " +
-                "FROM posts p " +
-                "LEFT JOIN users u ON p.user_id = u.id " +
-                "WHERE p.user_id = ? " +
-                "ORDER BY p.created_at DESC LIMIT ? OFFSET ?";
+        // 🟢 CRASH FIX: Dropped LEFT JOIN users table, fetching avatars dynamically
+        String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
+                "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", " +
+                "user_id AS \"userId\", username " +
+                "FROM posts " +
+                "WHERE user_id = ? " +
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?";
 
         List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, userId, size, page * size);
+
+        if (!livePosts.isEmpty()) {
+            String author = (String) livePosts.get(0).get("username");
+            try {
+                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(author);
+                if (remoteUser != null && !remoteUser.isEmpty()) {
+                    String liveAvatar = (String) remoteUser.get(0).get("profilePictureUrl");
+                    livePosts.forEach(post -> post.put("avatarUrl", liveAvatar));
+                }
+            } catch (Exception ignored) {}
+        }
         return ResponseEntity.ok(livePosts);
     }
 
@@ -294,7 +296,6 @@ public class SocialController {
             @RequestParam("file") MultipartFile file) {
 
         try {
-            // 1. Upload to Blob Service (Pass userId cleanly as String)
             Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
             String newPicUrl = (String) blobResponse.get("mediaUrl");
 
@@ -302,13 +303,12 @@ public class SocialController {
                 throw new IllegalStateException("Media Vault returned an empty media URL.");
             }
 
-            // 2. Sync Avatar with User Catalog
             userCatalogClient.updateInternalAvatar(username, Map.of("profilePictureUrl", newPicUrl));
 
-            // 3. Cache and local DB update
             String profileKey = "user:profile:" + userId;
             redisTemplate.opsForHash().put(profileKey, "avatarUrl", newPicUrl);
-            jdbcTemplate.update("UPDATE users SET profile_picture_url = ? WHERE id = ?", newPicUrl, userId);
+
+            // 🟢 CRASH FIX: Removed jdbcTemplate.update("UPDATE users...") here
 
             return ResponseEntity.ok(Map.of(
                     "status", "SUCCESS",
@@ -379,20 +379,38 @@ public class SocialController {
 
     @GetMapping("/post/{postId}/comments")
     public ResponseEntity<List<com.SocialService.Communities.DTOs.CommentResponseDTO>> getComments(@PathVariable Long postId) {
-        String sql = "SELECT c.id, c.content, c.parent_id AS parentId, c.created_at AS createdAt, c.user_id AS userId, u.username, u.profile_picture_url AS avatarUrl FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC";
+        // 🟢 CRASH FIX: Dropped JOIN users table, dynamically fetching via User Catalog
+        String sql = "SELECT id, content, parent_id AS parentId, created_at AS createdAt, user_id AS userId, username FROM comments WHERE post_id = ? ORDER BY created_at ASC";
         try {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, postId);
+
+            java.util.Set<String> uniqueUsernames = rows.stream()
+                    .map(r -> (String) r.get("username"))
+                    .filter(u -> u != null)
+                    .collect(java.util.stream.Collectors.toSet());
+
+            Map<String, String> avatarMap = new HashMap<>();
+            for (String uname : uniqueUsernames) {
+                try {
+                    List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname);
+                    if (remoteUser != null && !remoteUser.isEmpty()) {
+                        avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
+                    }
+                } catch (Exception ignored) {}
+            }
+
             List<com.SocialService.Communities.DTOs.CommentResponseDTO> allComments = new java.util.ArrayList<>();
             Map<Long, List<com.SocialService.Communities.DTOs.CommentResponseDTO>> childrenMap = new java.util.HashMap<>();
             List<com.SocialService.Communities.DTOs.CommentResponseDTO> rootComments = new java.util.ArrayList<>();
 
             for (Map<String, Object> row : rows) {
+                String rowUser = (String) row.get("username");
                 com.SocialService.Communities.DTOs.CommentResponseDTO dto = com.SocialService.Communities.DTOs.CommentResponseDTO.builder()
                         .id(((Number) row.get("id")).longValue())
                         .parentId(row.get("parentId") != null ? ((Number) row.get("parentId")).longValue() : null)
                         .content((String) row.get("content"))
-                        .username((String) row.get("username"))
-                        .avatarUrl((String) row.get("avatarUrl"))
+                        .username(rowUser)
+                        .avatarUrl(avatarMap.get(rowUser)) // Injected Dynamically
                         .createdAt(row.get("createdAt") != null ? ((java.sql.Timestamp) row.get("createdAt")).toLocalDateTime() : null)
                         .build();
                 allComments.add(dto);
@@ -431,10 +449,11 @@ public class SocialController {
     @GetMapping("/user/{username}/profile")
     public ResponseEntity<?> getUserProfileData(@PathVariable String username) {
         try {
-            String sql = "SELECT username, profile_picture_url AS avatarUrl, is_premium AS isPremium FROM users WHERE username = ?";
-            Map<String, Object> userProfile = jdbcTemplate.queryForMap(sql, username.toLowerCase().trim());
-            return ResponseEntity.ok(userProfile);
-        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
+            // Fetch directly from User Catalog instead of local missing DB
+            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(username.trim().toLowerCase());
+            if (remoteUser != null && !remoteUser.isEmpty()) {
+                return ResponseEntity.ok(remoteUser.get(0));
+            }
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "User not found"));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
@@ -515,16 +534,15 @@ public class SocialController {
         }
     }
 
-    // 🟢 FIXED: Moved outside the delete method, properly placed inside the class
     @GetMapping("/post/{postId}")
     public ResponseEntity<?> getSinglePost(@PathVariable Long postId) {
         try {
-            String sql = "SELECT p.id, p.title, p.content, p.media_url AS \"mediaUrl\", p.media_type AS \"mediaType\", " +
-                    "p.score, p.comment_count AS \"commentCount\", p.created_at AS \"createdAt\", " +
-                    "p.user_id AS \"userId\", p.username, u.profile_picture_url AS \"avatarUrl\" " +
-                    "FROM posts p " +
-                    "LEFT JOIN users u ON p.user_id = u.id " +
-                    "WHERE p.id = ?";
+            // 🟢 CRASH FIX: Dropped LEFT JOIN users table here as well
+            String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
+                    "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", " +
+                    "user_id AS \"userId\", username " +
+                    "FROM posts " +
+                    "WHERE id = ?";
 
             Map<String, Object> post = jdbcTemplate.queryForMap(sql, postId);
 
