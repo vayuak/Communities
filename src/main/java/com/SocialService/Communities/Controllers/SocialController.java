@@ -281,27 +281,38 @@ public class SocialController {
     }
     @GetMapping("/post/{postId}/comments")
     public ResponseEntity<List<com.SocialService.Communities.DTOs.CommentResponseDTO>> getComments(@PathVariable Long postId) {
-        // 🟢 FIX: Select the stored username directly from the comments table or join with posts
-        String sql = "SELECT id, content, parent_id, created_at, user_id, " +
-                "COALESCE(username, (SELECT p.username FROM posts p WHERE p.user_id = c.user_id LIMIT 1)) AS username " +
-                "FROM comments c WHERE c.post_id = ? ORDER BY c.created_at ASC";
+        // 🟢 1. Query only valid columns from comments table
+        String sql = "SELECT id, content, parent_id, created_at, user_id FROM comments WHERE post_id = ? ORDER BY created_at ASC";
         try {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, postId);
 
-            // Extract unique usernames to fetch DPs from User Catalog
-            Set<String> uniqueUsernames = rows.stream()
-                    .map(r -> (String) r.get("username"))
-                    .filter(u -> u != null && !u.trim().isEmpty())
+            // 🟢 2. Extract unique user IDs
+            Set<Long> uniqueUserIds = rows.stream()
+                    .map(r -> ((Number) r.get("user_id")).longValue())
                     .collect(Collectors.toSet());
 
+            // 🟢 3. Resolve usernames from posts table by user_id
+            Map<Long, String> userIdToUsernameMap = new HashMap<>();
+            if (!uniqueUserIds.isEmpty()) {
+                String inSql = String.join(",", java.util.Collections.nCopies(uniqueUserIds.size(), "?"));
+                String userLookupSql = String.format("SELECT DISTINCT user_id, username FROM posts WHERE user_id IN (%s)", inSql);
+
+                jdbcTemplate.query(userLookupSql, uniqueUserIds.toArray(), (rs) -> {
+                    userIdToUsernameMap.put(rs.getLong("user_id"), rs.getString("username"));
+                });
+            }
+
+            // 🟢 4. Resolve avatars from User Catalog Service using the resolved handles
             Map<String, String> avatarMap = new HashMap<>();
-            for (String uname : uniqueUsernames) {
-                try {
-                    List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
-                    if (remoteUser != null && !remoteUser.isEmpty()) {
-                        avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
-                    }
-                } catch (Exception ignored) {}
+            for (String uname : userIdToUsernameMap.values()) {
+                if (uname != null && !uname.trim().isEmpty()) {
+                    try {
+                        List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
+                        if (remoteUser != null && !remoteUser.isEmpty()) {
+                            avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
+                        }
+                    } catch (Exception ignored) {}
+                }
             }
 
             List<com.SocialService.Communities.DTOs.CommentResponseDTO> allComments = new java.util.ArrayList<>();
@@ -309,9 +320,10 @@ public class SocialController {
             List<com.SocialService.Communities.DTOs.CommentResponseDTO> rootComments = new java.util.ArrayList<>();
 
             for (Map<String, Object> row : rows) {
-                String commentUsername = (String) row.get("username");
-                if (commentUsername == null || commentUsername.trim().isEmpty()) {
-                    commentUsername = "Anonymous";
+                Long commentUserId = ((Number) row.get("user_id")).longValue();
+                String resolvedUsername = userIdToUsernameMap.get(commentUserId);
+                if (resolvedUsername == null || resolvedUsername.trim().isEmpty()) {
+                    resolvedUsername = "User_" + commentUserId;
                 }
 
                 Object parentObj = row.get("parent_id");
@@ -321,8 +333,8 @@ public class SocialController {
                         .id(((Number) row.get("id")).longValue())
                         .parentId(parentObj != null ? ((Number) parentObj).longValue() : null)
                         .content((String) row.get("content"))
-                        .username(commentUsername)
-                        .avatarUrl(avatarMap.get(commentUsername))
+                        .username(resolvedUsername)
+                        .avatarUrl(avatarMap.get(resolvedUsername))
                         .createdAt(createdObj != null ? ((java.sql.Timestamp) createdObj).toLocalDateTime() : null)
                         .build();
                 allComments.add(dto);
@@ -351,10 +363,20 @@ public class SocialController {
         }
     }
 
-    @GetMapping("/user/{username}/full-profile")
+    @GetMapping({
+            "/user/{username}/full-profile",
+            "/user/{username}/full-profile/"
+    })
     public ResponseEntity<?> getFullProfile(@PathVariable String username) {
         Map<String, Object> response = new HashMap<>();
-        String cleanUsername = username.replace("@", "").trim().toLowerCase();
+
+        // 🟢 Robust handle cleaning
+        String cleanUsername = java.net.URLDecoder.decode(username, java.nio.charset.StandardCharsets.UTF_8)
+                .replace("@", "")
+                .trim()
+                .toLowerCase();
+
+        log.info("🔍 [FULL PROFILE FETCH] Clean Handle: '{}'", cleanUsername);
 
         try {
             Map<String, Object> safeProfile = new HashMap<>();
@@ -370,7 +392,6 @@ public class SocialController {
                 log.warn("Feign user catalog lookup failed for {}: {}", cleanUsername, e.getMessage());
             }
 
-            // Fallback object to prevent 404 HTTP errors if catalog returns empty
             if (safeProfile.isEmpty()) {
                 safeProfile.put("username", cleanUsername);
                 safeProfile.put("profilePictureUrl", null);
