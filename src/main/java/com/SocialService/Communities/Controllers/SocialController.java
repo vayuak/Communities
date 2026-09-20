@@ -69,6 +69,7 @@ public class SocialController {
         }
     }
 
+    // 🟢 FIXED: Moved out of the nested structure and updated to drop LEFT JOIN
     @GetMapping("/search")
     public ResponseEntity<?> searchGlobalScamDatabase(
             @RequestParam String keyword,
@@ -79,6 +80,7 @@ public class SocialController {
         String input = keyword.trim();
         Map<String, Object> targetPayload = new HashMap<>();
 
+        // 1. User Search Pathway
         if (input.startsWith("@") && input.length() > 1) {
             String targetHandle = input.substring(1);
             List<Map<String, Object>> remoteUsers = userCatalogClient.searchUsersByHandle(targetHandle);
@@ -87,16 +89,39 @@ public class SocialController {
             return ResponseEntity.ok(targetPayload);
         }
 
-        String sql = "SELECT p.id, p.title, p.content, p.media_url AS \"mediaUrl\", p.media_type AS \"mediaType\", " +
-                "p.score, p.comment_count AS \"commentCount\", p.created_at AS \"createdAt\", " +
-                "p.user_id AS \"userId\", u.username, u.profile_picture_url AS \"avatarUrl\" " +
-                "FROM posts p " +
-                "LEFT JOIN users u ON p.user_id = u.id " +
-                "WHERE LOWER(p.content) LIKE LOWER(?) OR LOWER(p.title) LIKE LOWER(?) " +
-                "ORDER BY p.created_at DESC LIMIT ? OFFSET ?";
+        // 2. Post Title/Content Search Pathway (FIXED: Dropped LEFT JOIN)
+        String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
+                "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", " +
+                "user_id AS \"userId\", username " +
+                "FROM posts " +
+                "WHERE LOWER(content) LIKE LOWER(?) OR LOWER(title) LIKE LOWER(?) " +
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?";
 
         String searchParam = "%" + input + "%";
         List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, searchParam, searchParam, size, page * size);
+
+        // 3. Extract unique usernames to fetch live avatars
+        java.util.Set<String> uniqueUsernames = livePosts.stream()
+                .map(p -> (String) p.get("username"))
+                .collect(java.util.stream.Collectors.toSet());
+
+        Map<String, String> avatarMap = new HashMap<>();
+        for (String uname : uniqueUsernames) {
+            try {
+                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname);
+                if (remoteUser != null && !remoteUser.isEmpty()) {
+                    avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
+                }
+            } catch (Exception e) {
+                log.warn("Could not fetch avatar for {}: {}", uname, e.getMessage());
+            }
+        }
+
+        // 4. Inject the true avatar into every searched post
+        livePosts.forEach(post -> {
+            String author = (String) post.get("username");
+            post.put("avatarUrl", avatarMap.get(author));
+        });
 
         targetPayload.put("type", "POSTS");
         targetPayload.put("results", livePosts);
@@ -170,23 +195,48 @@ public class SocialController {
         }
     }
 
-    @PostMapping("/feed")
+    @GetMapping("/feed")
     public ResponseEntity<List<Map<String, Object>>> getCityFeed(
             @RequestParam String city,
             @RequestParam(required = false) String category,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
 
-        String sql = "SELECT p.id, p.title, p.content, p.media_url AS \"mediaUrl\", p.media_type AS \"mediaType\", " +
-                "p.score, p.comment_count AS \"commentCount\", p.created_at AS \"createdAt\", " +
-                "p.user_id AS \"userId\", u.username, u.profile_picture_url AS \"avatarUrl\" " +
-                "FROM posts p " +
-                "LEFT JOIN users u ON p.user_id = u.id " +
-                "WHERE p.city_name = ? " +
-                "ORDER BY p.created_at DESC LIMIT ? OFFSET ?";
+        // 1. Drop the broken LEFT JOIN. Use case-insensitive matching for the city.
+        String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
+                "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", " +
+                "user_id AS \"userId\", username " +
+                "FROM posts " +
+                "WHERE LOWER(city_name) = LOWER(?) " +
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?";
 
-        List<Map<String, Object>> liveFeed = jdbcTemplate.queryForList(sql, city, size, page * size);
-        return ResponseEntity.ok(liveFeed);
+        List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, city.trim(), size, page * size);
+
+        // 2. Extract unique usernames from the feed
+        java.util.Set<String> uniqueUsernames = livePosts.stream()
+                .map(p -> (String) p.get("username"))
+                .collect(java.util.stream.Collectors.toSet());
+
+        // 3. Fetch fresh Avatars dynamically from User Catalog
+        Map<String, String> avatarMap = new HashMap<>();
+        for (String uname : uniqueUsernames) {
+            try {
+                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname);
+                if (remoteUser != null && !remoteUser.isEmpty()) {
+                    avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
+                }
+            } catch (Exception e) {
+                log.warn("Could not fetch avatar for {}: {}", uname, e.getMessage());
+            }
+        }
+
+        // 4. Inject the true avatar into every post
+        livePosts.forEach(post -> {
+            String author = (String) post.get("username");
+            post.put("avatarUrl", avatarMap.get(author));
+        });
+
+        return ResponseEntity.ok(livePosts);
     }
 
     @GetMapping("/post/my-posts")
@@ -207,13 +257,11 @@ public class SocialController {
         return ResponseEntity.ok(livePosts);
     }
 
-    // 🟢 FIX: Unified and Bulletproof Comment Deletion (targets comments table and flattens hierarchy)
     @DeleteMapping("/post/comment/{commentId}")
     public ResponseEntity<?> deleteComment(
             @PathVariable Long commentId,
             @RequestAttribute("userId") Long userId) {
         try {
-            // 1. Verify Ownership & Retrieve the associated Post ID
             String checkSql = "SELECT user_id, post_id FROM comments WHERE id = ?";
             Map<String, Object> commentData = jdbcTemplate.queryForMap(checkSql, commentId);
 
@@ -224,14 +272,8 @@ public class SocialController {
 
             Long postId = ((Number) commentData.get("post_id")).longValue();
 
-            // 2. Flatten Hierarchy to prevent foreign key constraint crashes
-            // If anyone replied to this comment, detach them before deleting it.
             jdbcTemplate.update("UPDATE comments SET parent_id = NULL WHERE parent_id = ?", commentId);
-
-            // 3. Final Deletion
             jdbcTemplate.update("DELETE FROM comments WHERE id = ?", commentId);
-
-            // 4. Keep Post stats accurate by decrementing the comment count safely
             jdbcTemplate.update("UPDATE posts SET comment_count = GREATEST(COALESCE(comment_count, 0) - 1, 0) WHERE id = ?", postId);
 
             return ResponseEntity.ok(Map.of("status", "SUCCESS", "message", "Comment deleted."));
@@ -255,14 +297,11 @@ public class SocialController {
             Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
             String newPicUrl = (String) blobResponse.get("mediaUrl");
 
-            // 1. Update remote User Catalog (Auth Service)
             userCatalogClient.updateInternalAvatar(username, Map.of("profilePictureUrl", newPicUrl));
 
-            // 2. Update Redis Cache
             String profileKey = "user:profile:" + userId;
             redisTemplate.opsForHash().put(profileKey, "avatarUrl", newPicUrl);
 
-            // 3. Update Local Social DB so the Feed's SQL JOIN sees the new avatar!
             jdbcTemplate.update("UPDATE users SET profile_picture_url = ? WHERE id = ?", newPicUrl, userId);
 
             return ResponseEntity.ok(Map.of(
@@ -392,15 +431,40 @@ public class SocialController {
         }
     }
 
-    @DeleteMapping("/debug/flush-redis")
-    public ResponseEntity<String> flushEmbeddedRedis() {
-        if (redisTemplate.getConnectionFactory() != null) {
-            redisTemplate.getConnectionFactory().getConnection().flushAll();
+    @GetMapping("/user/{username}/full-profile")
+    public ResponseEntity<?> getFullProfile(@PathVariable String username) {
+        Map<String, Object> response = new HashMap<>();
+
+        try {
+            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(username);
+            if (remoteUser != null && !remoteUser.isEmpty()) {
+                response.put("profile", remoteUser.get(0));
+            } else {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(Map.of("error", "User identity untraceable."));
+            }
+            String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
+                    "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", city_name AS \"cityName\" " +
+                    "FROM posts WHERE username = ? ORDER BY created_at DESC";
+
+            List<Map<String, Object>> userPosts = jdbcTemplate.queryForList(sql, username);
+
+            String liveAvatarUrl = (String) remoteUser.get(0).get("profilePictureUrl");
+            userPosts.forEach(post -> {
+                post.put("avatarUrl", liveAvatarUrl);
+                post.put("username", username);
+            });
+
+            response.put("posts", userPosts);
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            log.error("Profile aggregation failed for {}: {}", username, e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Failed to aggregate profile vectors."));
         }
-        return ResponseEntity.ok("In-Memory Redis cache cleared!");
     }
 
-    // 🟢 Bulletproof Deletion Waterfall - Uses Feign Client to bypass ShieldHandshakeFilter
     @DeleteMapping("/post/{postId}/delete")
     public ResponseEntity<?> purgePostRecord(
             @PathVariable Long postId,
@@ -413,12 +477,10 @@ public class SocialController {
                 return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Unauthorized to delete this post."));
             }
 
-            // 1. Wipe Media Vault Remotely using authorized Feign Client
             if (postData.get("media_url") != null && postData.get("media_url").toString().contains("/stream/")) {
                 String mediaUrl = postData.get("media_url").toString();
                 String mediaId = mediaUrl.substring(mediaUrl.lastIndexOf("/") + 1);
                 try {
-                    // No more RestTemplate. We use the internal blobClient to pass the security handshake!
                     blobClient.deleteMedia(mediaId);
                     log.info("Media vault successfully purged for mediaId: {}", mediaId);
                 } catch (Exception blobEx) {
@@ -426,14 +488,12 @@ public class SocialController {
                 }
             }
 
-            // 2. Clear Database Integrity Tree Safely (Wipe constraints first)
             jdbcTemplate.update("UPDATE comments SET parent_id = NULL WHERE post_id = ?", postId);
             jdbcTemplate.update("DELETE FROM comments WHERE post_id = ?", postId);
 
             jdbcTemplate.update("DELETE FROM post_upvotes WHERE post_id = ?", postId);
             jdbcTemplate.update("DELETE FROM post_downvotes WHERE post_id = ?", postId);
 
-            // 3. Clear Post
             jdbcTemplate.update("DELETE FROM posts WHERE id = ?", postId);
 
             return ResponseEntity.ok(Map.of("status", "SUCCESS", "message", "Post completely purged."));
@@ -442,6 +502,35 @@ public class SocialController {
         } catch (Exception e) {
             log.error("Post deletion cascade failed: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Database blocked deletion: " + e.getMessage()));
+        }
+    }
+
+    // 🟢 FIXED: Moved outside the delete method, properly placed inside the class
+    @GetMapping("/post/{postId}")
+    public ResponseEntity<?> getSinglePost(@PathVariable Long postId) {
+        try {
+            String sql = "SELECT p.id, p.title, p.content, p.media_url AS \"mediaUrl\", p.media_type AS \"mediaType\", " +
+                    "p.score, p.comment_count AS \"commentCount\", p.created_at AS \"createdAt\", " +
+                    "p.user_id AS \"userId\", p.username, u.profile_picture_url AS \"avatarUrl\" " +
+                    "FROM posts p " +
+                    "LEFT JOIN users u ON p.user_id = u.id " +
+                    "WHERE p.id = ?";
+
+            Map<String, Object> post = jdbcTemplate.queryForMap(sql, postId);
+
+            try {
+                String author = (String) post.get("username");
+                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(author);
+                if (remoteUser != null && !remoteUser.isEmpty()) {
+                    post.put("avatarUrl", remoteUser.get(0).get("profilePictureUrl"));
+                }
+            } catch (Exception ignored) {}
+
+            return ResponseEntity.ok(post);
+        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Post not found."));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Failed to load post."));
         }
     }
 }

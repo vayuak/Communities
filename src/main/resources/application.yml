@@ -43,10 +43,12 @@ spring:
       enabled: false
     ollama:
       enabled: false
-
 ghost:
   shield:
     jwt-secret: ${JWT_SECRET}
+    key: ${GHOST_SHIELD_KEY}
+  gateway:
+    secret: ${GHOST_GATEWAY_SECRET}
 
 user:
   catalog:
