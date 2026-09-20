@@ -282,7 +282,7 @@ public class SocialController {
 
     @GetMapping("/post/{postId}/comments")
     public ResponseEntity<List<com.SocialService.Communities.DTOs.CommentResponseDTO>> getComments(@PathVariable Long postId) {
-        // 🟢 Query comments table safely
+        // 1. Fetch raw comments directly from social_db
         String sql = "SELECT id, content, parent_id, created_at, user_id FROM comments WHERE post_id = ? ORDER BY created_at ASC";
         try {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, postId);
@@ -291,12 +291,22 @@ public class SocialController {
                     .map(r -> ((Number) r.get("user_id")).longValue())
                     .collect(Collectors.toSet());
 
-            // Resolve each user's true handle and profile picture from User Catalog
+            // 2. Map user IDs to Handles & DPs via User Catalog Service
             Map<Long, Map<String, String>> userMetadataMap = new HashMap<>();
             for (Long uid : uniqueUserIds) {
                 try {
-                    // 🟢 Call User Catalog endpoint by User ID or Handle
+                    // Search by user_id string or user catalog ID endpoint
                     List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(String.valueOf(uid));
+
+                    // Fallback to searching posts table for the handle if catalog handles numeric IDs differently
+                    if (remoteUser == null || remoteUser.isEmpty()) {
+                        String handleSql = "SELECT username FROM posts WHERE user_id = ? LIMIT 1";
+                        List<String> handles = jdbcTemplate.queryForList(handleSql, String.class, uid);
+                        if (!handles.isEmpty()) {
+                            remoteUser = userCatalogClient.searchUsersByHandle(handles.get(0));
+                        }
+                    }
+
                     if (remoteUser != null && !remoteUser.isEmpty()) {
                         Map<String, String> meta = new HashMap<>();
                         meta.put("username", (String) remoteUser.get(0).get("username"));
@@ -352,10 +362,10 @@ public class SocialController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
         }
     }
+
     @GetMapping("/user/{username}/full-profile")
     public ResponseEntity<?> getFullProfile(@PathVariable String username) {
         Map<String, Object> response = new HashMap<>();
-        // 🟢 FIX 1: Strip '@' and aggressively trim whitespace to prevent routing mismatches
         String cleanUsername = username.replace("@", "").trim().toLowerCase();
 
         try {
@@ -372,7 +382,7 @@ public class SocialController {
                 log.warn("Feign user catalog lookup failed for {}: {}", cleanUsername, e.getMessage());
             }
 
-            // 🟢 FIX 2: Fallback profile state instead of returning HTTP 404
+            // Fallback object to prevent 404 HTTP errors if catalog returns empty
             if (safeProfile.isEmpty()) {
                 safeProfile.put("username", cleanUsername);
                 safeProfile.put("profilePictureUrl", null);
@@ -381,13 +391,11 @@ public class SocialController {
             safeProfile.put("avatarUrl", liveAvatarUrl);
             response.put("profile", safeProfile);
 
-            // Fetch all posts authored by this handle in social_db
             String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
                     "score, comment_count AS \"commentCount\", created_at AS \"createdAt\", city_name AS \"cityName\" " +
                     "FROM posts WHERE LOWER(username) = LOWER(?) ORDER BY created_at DESC";
 
             List<Map<String, Object>> userPosts = jdbcTemplate.queryForList(sql, cleanUsername);
-
             final String finalAvatar = liveAvatarUrl;
             userPosts.forEach(post -> {
                 post.put("avatarUrl", finalAvatar);
