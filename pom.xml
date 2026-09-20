@@ -78,7 +78,17 @@
             <artifactId>jjwt-jackson</artifactId>
             <version>0.12.6</version> <scope>runtime</scope>
         </dependency>
-
+        <!-- Multipart Form Encoder Support for Blob Client Uploads -->
+        <dependency>
+            <groupId>io.github.openfeign.form</groupId>
+            <artifactId>feign-form</artifactId>
+            <version>3.8.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.openfeign.form</groupId>
+            <artifactId>feign-form-spring</artifactId>
+            <version>3.8.0</version>
+        </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

@@ -7,7 +7,7 @@ import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 @EnableCaching
-@EnableFeignClients(basePackages = "com.SocialService.Communities.FeignClients")
+@EnableFeignClients(basePackages = "com.SocialService.Communities.Clients")
 @SpringBootApplication
 @EnableScheduling
 public class CommunitiesApplication {
