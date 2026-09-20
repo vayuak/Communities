@@ -294,14 +294,20 @@ public class SocialController {
             @RequestParam("file") MultipartFile file) {
 
         try {
+            // 1. Upload to Blob Service (Pass userId cleanly as String)
             Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
             String newPicUrl = (String) blobResponse.get("mediaUrl");
 
+            if (newPicUrl == null || newPicUrl.isEmpty()) {
+                throw new IllegalStateException("Media Vault returned an empty media URL.");
+            }
+
+            // 2. Sync Avatar with User Catalog
             userCatalogClient.updateInternalAvatar(username, Map.of("profilePictureUrl", newPicUrl));
 
+            // 3. Cache and local DB update
             String profileKey = "user:profile:" + userId;
             redisTemplate.opsForHash().put(profileKey, "avatarUrl", newPicUrl);
-
             jdbcTemplate.update("UPDATE users SET profile_picture_url = ? WHERE id = ?", newPicUrl, userId);
 
             return ResponseEntity.ok(Map.of(
@@ -309,10 +315,14 @@ public class SocialController {
                     "message", "Profile picture synced globally.",
                     "avatarUrl", newPicUrl
             ));
-        } catch (Exception e) {
-            log.error("Global Profile Sync Failed: {}", e.getMessage());
+        } catch (feign.FeignException e) {
+            log.error("🔴 FEIGN CROSS-NODE CALL FAILED! Status: {}, Body: {}", e.status(), e.contentUTF8());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Profile synchronization failed across nodes."));
+                    .body(Map.of("error", "Cross-node sync failed: " + e.contentUTF8()));
+        } catch (Exception e) {
+            log.error("🔴 GLOBAL PROFILE SYNC FAILED AT NODE:", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Profile synchronization failed: " + e.getMessage()));
         }
     }
 
