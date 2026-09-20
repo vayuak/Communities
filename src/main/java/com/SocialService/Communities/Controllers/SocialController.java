@@ -279,39 +279,27 @@ public class SocialController {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
         }
     }
-
     @GetMapping("/post/{postId}/comments")
     public ResponseEntity<List<com.SocialService.Communities.DTOs.CommentResponseDTO>> getComments(@PathVariable Long postId) {
-        // 1. Fetch raw comments directly from social_db
-        String sql = "SELECT id, content, parent_id, created_at, user_id FROM comments WHERE post_id = ? ORDER BY created_at ASC";
+        // 🟢 FIX: Select the stored username directly from the comments table or join with posts
+        String sql = "SELECT id, content, parent_id, created_at, user_id, " +
+                "COALESCE(username, (SELECT p.username FROM posts p WHERE p.user_id = c.user_id LIMIT 1)) AS username " +
+                "FROM comments c WHERE c.post_id = ? ORDER BY c.created_at ASC";
         try {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, postId);
 
-            Set<Long> uniqueUserIds = rows.stream()
-                    .map(r -> ((Number) r.get("user_id")).longValue())
+            // Extract unique usernames to fetch DPs from User Catalog
+            Set<String> uniqueUsernames = rows.stream()
+                    .map(r -> (String) r.get("username"))
+                    .filter(u -> u != null && !u.trim().isEmpty())
                     .collect(Collectors.toSet());
 
-            // 2. Map user IDs to Handles & DPs via User Catalog Service
-            Map<Long, Map<String, String>> userMetadataMap = new HashMap<>();
-            for (Long uid : uniqueUserIds) {
+            Map<String, String> avatarMap = new HashMap<>();
+            for (String uname : uniqueUsernames) {
                 try {
-                    // Search by user_id string or user catalog ID endpoint
-                    List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(String.valueOf(uid));
-
-                    // Fallback to searching posts table for the handle if catalog handles numeric IDs differently
-                    if (remoteUser == null || remoteUser.isEmpty()) {
-                        String handleSql = "SELECT username FROM posts WHERE user_id = ? LIMIT 1";
-                        List<String> handles = jdbcTemplate.queryForList(handleSql, String.class, uid);
-                        if (!handles.isEmpty()) {
-                            remoteUser = userCatalogClient.searchUsersByHandle(handles.get(0));
-                        }
-                    }
-
+                    List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
                     if (remoteUser != null && !remoteUser.isEmpty()) {
-                        Map<String, String> meta = new HashMap<>();
-                        meta.put("username", (String) remoteUser.get(0).get("username"));
-                        meta.put("avatarUrl", (String) remoteUser.get(0).get("profilePictureUrl"));
-                        userMetadataMap.put(uid, meta);
+                        avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
                     }
                 } catch (Exception ignored) {}
             }
@@ -321,20 +309,20 @@ public class SocialController {
             List<com.SocialService.Communities.DTOs.CommentResponseDTO> rootComments = new java.util.ArrayList<>();
 
             for (Map<String, Object> row : rows) {
-                Long commentUserId = ((Number) row.get("user_id")).longValue();
+                String commentUsername = (String) row.get("username");
+                if (commentUsername == null || commentUsername.trim().isEmpty()) {
+                    commentUsername = "Anonymous";
+                }
+
                 Object parentObj = row.get("parent_id");
                 Object createdObj = row.get("created_at");
-
-                Map<String, String> userMeta = userMetadataMap.get(commentUserId);
-                String commentUsername = (userMeta != null && userMeta.get("username") != null) ? userMeta.get("username") : "User_" + commentUserId;
-                String commentAvatarUrl = (userMeta != null) ? userMeta.get("avatarUrl") : null;
 
                 com.SocialService.Communities.DTOs.CommentResponseDTO dto = com.SocialService.Communities.DTOs.CommentResponseDTO.builder()
                         .id(((Number) row.get("id")).longValue())
                         .parentId(parentObj != null ? ((Number) parentObj).longValue() : null)
                         .content((String) row.get("content"))
                         .username(commentUsername)
-                        .avatarUrl(commentAvatarUrl)
+                        .avatarUrl(avatarMap.get(commentUsername))
                         .createdAt(createdObj != null ? ((java.sql.Timestamp) createdObj).toLocalDateTime() : null)
                         .build();
                 allComments.add(dto);
