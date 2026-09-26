@@ -2,10 +2,10 @@ package com.SocialService.Communities.Controllers;
 
 import com.SocialService.Communities.Clients.UserCatalogClient;
 import com.SocialService.Communities.Models.Post;
-import com.SocialService.Communities.Models.RadarContinent;
 import com.SocialService.Communities.Repositories.PostRepository;
 import com.SocialService.Communities.Repositories.RadarContinentRepository;
 import com.SocialService.Communities.Repositories.SocialService;
+import com.SocialService.Communities.Services.ProfileCacheService;
 import com.SocialService.Communities.Clients.BlobClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.multipart.MultipartFile;
@@ -19,10 +19,7 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @RestController
@@ -40,6 +37,7 @@ public class SocialController {
     private final UserCatalogClient userCatalogClient;
     private final RadarContinentRepository radarContinentRepository;
     private final BlobClient blobClient;
+    private final ProfileCacheService profileCacheService;
 
     @GetMapping(value = "/notifications/subscribe", produces = org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter subscribeToNotificationStream(@RequestAttribute("userId") Long userId) {
@@ -78,7 +76,7 @@ public class SocialController {
             try {
                 List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
                 if (remoteUser != null && !remoteUser.isEmpty()) avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
-            } catch (Exception e) {}
+            } catch (Exception ignored) {}
         }
         livePosts.forEach(post -> post.put("avatarUrl", avatarMap.get((String) post.get("username"))));
 
@@ -126,183 +124,56 @@ public class SocialController {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
         }
     }
-    @GetMapping("/feed")
-    public ResponseEntity<List<Map<String, Object>>> getCityFeed(@RequestParam String city, @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "10") int size) {
-        String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE LOWER(city_name) = LOWER(?) ORDER BY created_at DESC LIMIT ? OFFSET ?";
-        List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, city.trim(), size, page * size);
 
-        Set<String> uniqueUsernames = livePosts.stream().map(p -> (String) p.get("username")).collect(Collectors.toSet());
-        Map<String, String> avatarMap = new HashMap<>();
-        for (String uname : uniqueUsernames) {
-            try {
-                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
-                if (remoteUser != null && !remoteUser.isEmpty()) avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
-            } catch (Exception e) {}
-        }
-        livePosts.forEach(post -> post.put("avatarUrl", avatarMap.get((String) post.get("username"))));
-        return ResponseEntity.ok(livePosts);
-    }
-
-    @GetMapping("/post/my-posts")
-    public ResponseEntity<List<Map<String, Object>>> getMyPosts(@RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "20") int size, @RequestAttribute("userId") Long userId) {
-        String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?";
-        List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, userId, size, page * size);
-
-        if (!livePosts.isEmpty()) {
-            try {
-                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(((String) livePosts.get(0).get("username")).trim().toLowerCase());
-                if (remoteUser != null && !remoteUser.isEmpty()) {
-                    String liveAvatar = (String) remoteUser.get(0).get("profilePictureUrl");
-                    livePosts.forEach(post -> post.put("avatarUrl", liveAvatar));
-                }
-            } catch (Exception ignored) {}
-        }
-        return ResponseEntity.ok(livePosts);
-    }
-
-    @DeleteMapping("/post/comment/{commentId}")
-    public ResponseEntity<?> deleteComment(@PathVariable Long commentId, @RequestAttribute("userId") Long userId) {
-        try {
-            Map<String, Object> commentData = jdbcTemplate.queryForMap("SELECT user_id, post_id FROM comments WHERE id = ?", commentId);
-            if (((Number) commentData.get("user_id")).longValue() != userId) return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Unauthorized"));
-
-            Long postId = ((Number) commentData.get("post_id")).longValue();
-            jdbcTemplate.update("UPDATE comments SET parent_id = NULL WHERE parent_id = ?", commentId);
-            jdbcTemplate.update("DELETE FROM comments WHERE id = ?", commentId);
-            jdbcTemplate.update("UPDATE posts SET comment_count = GREATEST(COALESCE(comment_count, 0) - 1, 0) WHERE id = ?", postId);
-
-            return ResponseEntity.ok(Map.of("status", "SUCCESS"));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
-        }
-    }
-
-    @PostMapping(value = "/user/profile/upload-and-update", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<?> uploadAndUpdateProfile(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username, @RequestParam("file") MultipartFile file) {
-        try {
-            Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
-            String newPicUrl = (String) blobResponse.get("mediaUrl");
-            if (newPicUrl == null || newPicUrl.isEmpty()) throw new IllegalStateException("Empty URL");
-
-            userCatalogClient.updateInternalAvatar(username.trim().toLowerCase(), Map.of("profilePictureUrl", newPicUrl));
-            redisTemplate.opsForHash().put("user:profile:" + userId, "avatarUrl", newPicUrl);
-
-            return ResponseEntity.ok(Map.of("status", "SUCCESS", "avatarUrl", newPicUrl));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
-        }
-    }
-
-    @PostMapping(value = "/post/upload-and-create", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<?> uploadAndCreatePost(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username, @RequestParam("file") MultipartFile file, @RequestParam("title") String title, @RequestParam("content") String content, @RequestParam("cityName") String cityName, @RequestParam("country") String country) {
-        try {
-            Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
-            Post post = new Post();
-            post.setTitle(title);
-            post.setContent(content);
-            post.setCityName(cityName);
-            post.setCity(cityName);
-            post.setCountry(country);
-            post.setMediaUrl((String) blobResponse.get("mediaUrl"));
-            post.setMediaType((String) blobResponse.get("mediaType"));
-            post.setUsername(username);
-
-            return ResponseEntity.status(HttpStatus.CREATED).body(socialService.createPost(post, userId));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
-        }
-    }
-
-    @DeleteMapping("/post/{postId}/delete")
-    public ResponseEntity<?> purgePostRecord(@PathVariable Long postId, @RequestAttribute("userId") Long userId) {
-        try {
-            Map<String, Object> postData = jdbcTemplate.queryForMap("SELECT user_id, media_url FROM posts WHERE id = ?", postId);
-            if (((Number) postData.get("user_id")).longValue() != userId) return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Unauthorized"));
-
-            if (postData.get("media_url") != null && postData.get("media_url").toString().contains("/stream/")) {
-                String mediaUrl = postData.get("media_url").toString();
-                try { blobClient.deleteMedia(mediaUrl.substring(mediaUrl.lastIndexOf("/") + 1)); } catch (Exception e) {}
-            }
-
-            jdbcTemplate.update("UPDATE comments SET parent_id = NULL WHERE post_id = ?", postId);
-            jdbcTemplate.update("DELETE FROM comments WHERE post_id = ?", postId);
-            jdbcTemplate.update("DELETE FROM post_upvotes WHERE post_id = ?", postId);
-            jdbcTemplate.update("DELETE FROM post_downvotes WHERE post_id = ?", postId);
-            jdbcTemplate.update("DELETE FROM posts WHERE id = ?", postId);
-
-            return ResponseEntity.ok(Map.of("status", "SUCCESS"));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
-        }
-    }
-
-    @GetMapping("/post/{postId}")
-    public ResponseEntity<?> getSinglePost(@PathVariable Long postId) {
-        try {
-            Map<String, Object> post = jdbcTemplate.queryForMap("SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE id = ?", postId);
-            try {
-                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(((String) post.get("username")).trim().toLowerCase());
-                if (remoteUser != null && !remoteUser.isEmpty()) post.put("avatarUrl", remoteUser.get(0).get("profilePictureUrl"));
-            } catch (Exception ignored) {}
-            return ResponseEntity.ok(post);
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Post not found."));
-        }
-    }
-
-    @GetMapping("/user/{username}/profile")
-    public ResponseEntity<?> getUserProfileData(@PathVariable String username) {
-        try {
-            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(username.trim().toLowerCase());
-            if (remoteUser != null && !remoteUser.isEmpty()) {
-                Map<String, Object> safeProfile = new HashMap<>(remoteUser.get(0));
-                safeProfile.put("avatarUrl", safeProfile.get("profilePictureUrl"));
-                return ResponseEntity.ok(safeProfile);
-            }
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "User not found"));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
-        }
-    }
     @PostMapping("/post/{postId}/comment")
     public ResponseEntity<?> addSecureComment(
             @PathVariable Long postId,
             @Valid @RequestBody com.SocialService.Communities.DTOs.CommentRequestDTO request,
             @RequestAttribute("userId") Long userId) {
         try {
-            // 🟢 Pass the userId to socialService
             com.SocialService.Communities.Models.Comment savedComment =
                     socialService.addSecureComment(postId, userId, request.getContent(), request.getParentId());
-
             return ResponseEntity.status(HttpStatus.CREATED).body(savedComment);
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
         }
     }
+
+    /**
+     * FIX: No more SQL Grammar Crashes. Maps User_ID to Username seamlessly.
+     */
     @GetMapping("/post/{postId}/comments")
     public ResponseEntity<List<com.SocialService.Communities.DTOs.CommentResponseDTO>> getComments(@PathVariable Long postId) {
-        // 🟢 1. Query only valid columns from comments table
         String sql = "SELECT id, content, parent_id, created_at, user_id FROM comments WHERE post_id = ? ORDER BY created_at ASC";
         try {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, postId);
 
-            // 🟢 2. Extract unique user IDs
             Set<Long> uniqueUserIds = rows.stream()
                     .map(r -> ((Number) r.get("user_id")).longValue())
                     .collect(Collectors.toSet());
 
-            // 🟢 3. Resolve usernames from posts table by user_id
             Map<Long, String> userIdToUsernameMap = new HashMap<>();
+
+            // Fast Bulk Handle Map from Local Posts Table
             if (!uniqueUserIds.isEmpty()) {
                 String inSql = String.join(",", java.util.Collections.nCopies(uniqueUserIds.size(), "?"));
                 String userLookupSql = String.format("SELECT DISTINCT user_id, username FROM posts WHERE user_id IN (%s)", inSql);
-
                 jdbcTemplate.query(userLookupSql, uniqueUserIds.toArray(), (rs) -> {
                     userIdToUsernameMap.put(rs.getLong("user_id"), rs.getString("username"));
                 });
             }
 
-            // 🟢 4. Resolve avatars from User Catalog Service using the resolved handles
+            // Fallback to Redis Profile Cache if user hasn't posted
+            for (Long uid : uniqueUserIds) {
+                if (!userIdToUsernameMap.containsKey(uid)) {
+                    Map<String, String> cached = profileCacheService.getUserProfileSummary(uid);
+                    if (cached != null && !cached.getOrDefault("username", "AnonymousTraveler").equals("AnonymousTraveler")) {
+                        userIdToUsernameMap.put(uid, cached.get("username"));
+                    }
+                }
+            }
+
+            // Resolve Real Avatars
             Map<String, String> avatarMap = new HashMap<>();
             for (String uname : userIdToUsernameMap.values()) {
                 if (uname != null && !uname.trim().isEmpty()) {
@@ -322,6 +193,8 @@ public class SocialController {
             for (Map<String, Object> row : rows) {
                 Long commentUserId = ((Number) row.get("user_id")).longValue();
                 String resolvedUsername = userIdToUsernameMap.get(commentUserId);
+
+                // Final safety fallback
                 if (resolvedUsername == null || resolvedUsername.trim().isEmpty()) {
                     resolvedUsername = "User_" + commentUserId;
                 }
@@ -363,6 +236,9 @@ public class SocialController {
         }
     }
 
+    /**
+     * FIX: Robust URI decoding and fallback objects stop the HTTP 404s dead in their tracks.
+     */
     @GetMapping({
             "/user/{username}/full-profile",
             "/user/{username}/full-profile/"
@@ -370,13 +246,16 @@ public class SocialController {
     public ResponseEntity<?> getFullProfile(@PathVariable String username) {
         Map<String, Object> response = new HashMap<>();
 
-        // 🟢 Robust handle cleaning
-        String cleanUsername = java.net.URLDecoder.decode(username, java.nio.charset.StandardCharsets.UTF_8)
-                .replace("@", "")
-                .trim()
-                .toLowerCase();
+        // 🟢 FIX: Decode safely and assign to a final variable for the lambda
+        String tempDecoded;
+        try {
+            tempDecoded = java.net.URLDecoder.decode(username, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            tempDecoded = username;
+        }
+        final String cleanUsername = tempDecoded.replace("@", "").trim().toLowerCase();
 
-        log.info("🔍 [FULL PROFILE FETCH] Clean Handle: '{}'", cleanUsername);
+        log.info("  [FULL PROFILE FETCH] Clean Handle: '{}'", cleanUsername);
 
         try {
             Map<String, Object> safeProfile = new HashMap<>();
@@ -406,8 +285,10 @@ public class SocialController {
 
             List<Map<String, Object>> userPosts = jdbcTemplate.queryForList(sql, cleanUsername);
             final String finalAvatar = liveAvatarUrl;
+
             userPosts.forEach(post -> {
                 post.put("avatarUrl", finalAvatar);
+                // cleanUsername is now effectively final and safe for this lambda
                 post.put("username", cleanUsername);
             });
 
@@ -418,6 +299,135 @@ public class SocialController {
             log.error("Profile aggregation failed for {}: {}", cleanUsername, e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("error", "Failed to aggregate profile: " + e.getMessage()));
+        }
+    }
+    // Other standard endpoints (unchanged, intact)
+    @GetMapping("/feed")
+    public ResponseEntity<List<Map<String, Object>>> getCityFeed(@RequestParam String city, @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "10") int size) {
+        String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE LOWER(city_name) = LOWER(?) ORDER BY created_at DESC LIMIT ? OFFSET ?";
+        List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, city.trim(), size, page * size);
+        Set<String> uniqueUsernames = livePosts.stream().map(p -> (String) p.get("username")).collect(Collectors.toSet());
+        Map<String, String> avatarMap = new HashMap<>();
+        for (String uname : uniqueUsernames) {
+            try {
+                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
+                if (remoteUser != null && !remoteUser.isEmpty()) avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
+            } catch (Exception ignored) {}
+        }
+        livePosts.forEach(post -> post.put("avatarUrl", avatarMap.get((String) post.get("username"))));
+        return ResponseEntity.ok(livePosts);
+    }
+
+    @GetMapping("/post/my-posts")
+    public ResponseEntity<List<Map<String, Object>>> getMyPosts(@RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "20") int size, @RequestAttribute("userId") Long userId) {
+        String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?";
+        List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, userId, size, page * size);
+        if (!livePosts.isEmpty()) {
+            try {
+                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(((String) livePosts.get(0).get("username")).trim().toLowerCase());
+                if (remoteUser != null && !remoteUser.isEmpty()) {
+                    String liveAvatar = (String) remoteUser.get(0).get("profilePictureUrl");
+                    livePosts.forEach(post -> post.put("avatarUrl", liveAvatar));
+                }
+            } catch (Exception ignored) {}
+        }
+        return ResponseEntity.ok(livePosts);
+    }
+
+    @DeleteMapping("/post/comment/{commentId}")
+    public ResponseEntity<?> deleteComment(@PathVariable Long commentId, @RequestAttribute("userId") Long userId) {
+        try {
+            Map<String, Object> commentData = jdbcTemplate.queryForMap("SELECT user_id, post_id FROM comments WHERE id = ?", commentId);
+            if (((Number) commentData.get("user_id")).longValue() != userId) return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Unauthorized"));
+            Long postId = ((Number) commentData.get("post_id")).longValue();
+            jdbcTemplate.update("UPDATE comments SET parent_id = NULL WHERE parent_id = ?", commentId);
+            jdbcTemplate.update("DELETE FROM comments WHERE id = ?", commentId);
+            jdbcTemplate.update("UPDATE posts SET comment_count = GREATEST(COALESCE(comment_count, 0) - 1, 0) WHERE id = ?", postId);
+            return ResponseEntity.ok(Map.of("status", "SUCCESS"));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping(value = "/user/profile/upload-and-update", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> uploadAndUpdateProfile(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username, @RequestParam("file") MultipartFile file) {
+        try {
+            Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
+            String newPicUrl = (String) blobResponse.get("mediaUrl");
+            if (newPicUrl == null || newPicUrl.isEmpty()) throw new IllegalStateException("Empty URL");
+            userCatalogClient.updateInternalAvatar(username.trim().toLowerCase(), Map.of("profilePictureUrl", newPicUrl));
+            redisTemplate.opsForHash().put("user:profile:" + userId, "avatarUrl", newPicUrl);
+            return ResponseEntity.ok(Map.of("status", "SUCCESS", "avatarUrl", newPicUrl));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping(value = "/post/upload-and-create", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> uploadAndCreatePost(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username, @RequestParam("file") MultipartFile file, @RequestParam("title") String title, @RequestParam("content") String content, @RequestParam("cityName") String cityName, @RequestParam("country") String country) {
+        try {
+            Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
+            Post post = new Post();
+            post.setTitle(title);
+            post.setContent(content);
+            post.setCityName(cityName);
+            post.setCity(cityName);
+            post.setCountry(country);
+            post.setMediaUrl((String) blobResponse.get("mediaUrl"));
+            post.setMediaType((String) blobResponse.get("mediaType"));
+            post.setUsername(username);
+            return ResponseEntity.status(HttpStatus.CREATED).body(socialService.createPost(post, userId));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/post/{postId}/delete")
+    public ResponseEntity<?> purgePostRecord(@PathVariable Long postId, @RequestAttribute("userId") Long userId) {
+        try {
+            Map<String, Object> postData = jdbcTemplate.queryForMap("SELECT user_id, media_url FROM posts WHERE id = ?", postId);
+            if (((Number) postData.get("user_id")).longValue() != userId) return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Unauthorized"));
+            if (postData.get("media_url") != null && postData.get("media_url").toString().contains("/stream/")) {
+                String mediaUrl = postData.get("media_url").toString();
+                try { blobClient.deleteMedia(mediaUrl.substring(mediaUrl.lastIndexOf("/") + 1)); } catch (Exception ignored) {}
+            }
+            jdbcTemplate.update("UPDATE comments SET parent_id = NULL WHERE post_id = ?", postId);
+            jdbcTemplate.update("DELETE FROM comments WHERE post_id = ?", postId);
+            jdbcTemplate.update("DELETE FROM post_upvotes WHERE post_id = ?", postId);
+            jdbcTemplate.update("DELETE FROM post_downvotes WHERE post_id = ?", postId);
+            jdbcTemplate.update("DELETE FROM posts WHERE id = ?", postId);
+            return ResponseEntity.ok(Map.of("status", "SUCCESS"));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/post/{postId}")
+    public ResponseEntity<?> getSinglePost(@PathVariable Long postId) {
+        try {
+            Map<String, Object> post = jdbcTemplate.queryForMap("SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE id = ?", postId);
+            try {
+                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(((String) post.get("username")).trim().toLowerCase());
+                if (remoteUser != null && !remoteUser.isEmpty()) post.put("avatarUrl", remoteUser.get(0).get("profilePictureUrl"));
+            } catch (Exception ignored) {}
+            return ResponseEntity.ok(post);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Post not found."));
+        }
+    }
+
+    @GetMapping("/user/{username}/profile")
+    public ResponseEntity<?> getUserProfileData(@PathVariable String username) {
+        try {
+            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(username.trim().toLowerCase());
+            if (remoteUser != null && !remoteUser.isEmpty()) {
+                Map<String, Object> safeProfile = new HashMap<>(remoteUser.get(0));
+                safeProfile.put("avatarUrl", safeProfile.get("profilePictureUrl"));
+                return ResponseEntity.ok(safeProfile);
+            }
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "User not found"));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
         }
     }
 }
