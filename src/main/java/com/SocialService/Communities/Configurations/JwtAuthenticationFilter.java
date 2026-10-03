@@ -35,15 +35,19 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 if (jwtUtils.validateJwtToken(jwt)) {
                     Claims claims = jwtUtils.getClaimsFromToken(jwt);
 
-                    // 🟢 ROBUST EXTRACTION: Fixes the hidden ClassCastException crashes
-                    String username = claims.getSubject();
-                    if (username == null) {
-                        username = claims.get("username", String.class);
-                    }
-
                     Object idObj = claims.get("userId");
                     if (idObj == null) idObj = claims.get("id");
                     Long userId = idObj != null ? Long.valueOf(idObj.toString()) : 0L;
+
+                    // 🟢 ROBUST IDENTIFICATION: Matches API Gateway exact logic
+                    String username;
+                    if (claims.get("username") != null && !claims.get("username").toString().trim().isEmpty()) {
+                        username = claims.get("username").toString().trim().toLowerCase();
+                    } else if (claims.getSubject() != null && !claims.getSubject().trim().isEmpty() && !claims.getSubject().startsWith("user_")) {
+                        username = claims.getSubject().trim().toLowerCase();
+                    } else {
+                        username = "user_" + userId;
+                    }
 
                     Boolean isPremium = claims.get("isPremium", Boolean.class);
                     if (isPremium == null) isPremium = false;

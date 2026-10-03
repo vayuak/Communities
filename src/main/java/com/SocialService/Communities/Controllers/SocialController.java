@@ -45,13 +45,11 @@ public class SocialController {
         String cleanName = username.trim().toLowerCase();
         String redisKey = "user:avatar:" + cleanName;
 
-        // 1. Bypass DB completely if in Redis
         Object cachedAvatar = redisTemplate.opsForValue().get(redisKey);
         if (cachedAvatar != null) {
             return cachedAvatar.equals("NO_AVATAR") ? null : (String) cachedAvatar;
         }
 
-        // 2. Network Fetch if missing
         try {
             List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanName);
             if (remoteUser != null && !remoteUser.isEmpty() && remoteUser.get(0).get("profilePictureUrl") != null) {
@@ -61,7 +59,6 @@ public class SocialController {
             }
         } catch (Exception ignored) {}
 
-        // 3. Negative Cache to prevent DB flooding
         redisTemplate.opsForValue().set(redisKey, "NO_AVATAR", java.time.Duration.ofHours(1));
         return null;
     }
@@ -70,30 +67,17 @@ public class SocialController {
     private String resolveAndCacheUsername(Long userId) {
         String redisKey = "user:id_to_name:" + userId;
 
-        // 1. Bypass DB completely if in Redis
         Object cachedName = redisTemplate.opsForValue().get(redisKey);
         if (cachedName != null) return (String) cachedName;
 
-        // 2. Fetch from DB
         try {
             String uname = jdbcTemplate.queryForObject("SELECT username FROM posts WHERE user_id = ? LIMIT 1", String.class, userId);
             if (uname != null && !uname.trim().isEmpty()) {
-                redisTemplate.opsForValue().set(redisKey, uname, java.time.Duration.ofHours(24));
+                redisTemplate.opsForValue().set(redisKey, uname, java.time.Duration.ofDays(30));
                 return uname;
             }
         } catch (Exception ignored) {}
 
-        // 3. Fallback to Catalog
-        try {
-            List<Map<String, Object>> remoteUsers = userCatalogClient.searchUsersByHandle(String.valueOf(userId));
-            if (remoteUsers != null && !remoteUsers.isEmpty() && remoteUsers.get(0).get("username") != null) {
-                String uname = (String) remoteUsers.get(0).get("username");
-                redisTemplate.opsForValue().set(redisKey, uname, java.time.Duration.ofHours(24));
-                return uname;
-            }
-        } catch (Exception ignored) {}
-
-        // 4. Default Fallback
         String fallback = "user" + userId;
         redisTemplate.opsForValue().set(redisKey, fallback, java.time.Duration.ofHours(1));
         return fallback;
@@ -105,8 +89,10 @@ public class SocialController {
     }
 
     @PostMapping("/post/create")
-    public ResponseEntity<?> createPost(@RequestBody Post post, @RequestAttribute("userId") Long userId) {
+    public ResponseEntity<?> createPost(@RequestBody Post post, @RequestAttribute("userId") Long userId, @RequestAttribute("username") String username) {
         try {
+            // 🟢 FORCE CACHE: Map ID to Username instantly on post creation
+            redisTemplate.opsForValue().set("user:id_to_name:" + userId, username.trim().toLowerCase(), java.time.Duration.ofDays(30));
             return ResponseEntity.status(HttpStatus.CREATED).body(socialService.createPost(post, userId));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
@@ -122,7 +108,6 @@ public class SocialController {
             String targetHandle = input.substring(1).trim().toLowerCase();
             List<Map<String, Object>> remoteUsers = userCatalogClient.searchUsersByHandle(targetHandle);
 
-            // Sync DPs to Cache
             if (remoteUsers != null && !remoteUsers.isEmpty() && remoteUsers.get(0).get("profilePictureUrl") != null) {
                 redisTemplate.opsForValue().set("user:avatar:" + targetHandle, remoteUsers.get(0).get("profilePictureUrl"), java.time.Duration.ofHours(24));
             }
@@ -149,10 +134,11 @@ public class SocialController {
     }
 
     @PutMapping("/user/profile/update-direct")
-    public ResponseEntity<?> updateProfileDataDirectly(@RequestAttribute("userId") Long userId, @RequestBody Map<String, String> body) {
+    public ResponseEntity<?> updateProfileDataDirectly(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username, @RequestBody Map<String, String> body) {
         try {
+            redisTemplate.opsForValue().set("user:id_to_name:" + userId, username.trim().toLowerCase(), java.time.Duration.ofDays(30));
             String newPic = body.get("profilePictureUrl");
-            if (newPic != null) redisTemplate.opsForValue().set("user:avatar:" + userId, newPic, java.time.Duration.ofHours(24));
+            if (newPic != null) redisTemplate.opsForValue().set("user:avatar:" + username.trim().toLowerCase(), newPic, java.time.Duration.ofHours(24));
             return ResponseEntity.ok(Map.of("status", "SUCCESS"));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
@@ -192,8 +178,12 @@ public class SocialController {
     public ResponseEntity<?> addSecureComment(
             @PathVariable Long postId,
             @Valid @RequestBody com.SocialService.Communities.DTOs.CommentRequestDTO request,
-            @RequestAttribute("userId") Long userId) {
+            @RequestAttribute("userId") Long userId,
+            @RequestAttribute("username") String username) { // 🟢 INJECTED USERNAME
         try {
+            // 🟢 FORCE CACHE: The exact moment someone comments, their ID is permanently mapped to their clean username!
+            redisTemplate.opsForValue().set("user:id_to_name:" + userId, username.trim().toLowerCase(), java.time.Duration.ofDays(30));
+
             com.SocialService.Communities.Models.Comment savedComment =
                     socialService.addSecureComment(postId, userId, request.getContent(), request.getParentId());
             return ResponseEntity.status(HttpStatus.CREATED).body(savedComment);
@@ -215,7 +205,6 @@ public class SocialController {
             Map<Long, String> userIdToUsernameMap = new HashMap<>();
             Map<String, String> avatarMap = new HashMap<>();
 
-            // 🟢 Lightning-fast O(1) Redis Resolution for Comments
             for (Long uid : uniqueUserIds) {
                 String uname = resolveAndCacheUsername(uid);
                 userIdToUsernameMap.put(uid, uname);
@@ -284,7 +273,6 @@ public class SocialController {
         try {
             Map<String, Object> safeProfile = new HashMap<>();
 
-            // 🟢 Redis Cache Call
             String liveAvatarUrl = resolveAndCacheAvatar(cleanUsername);
 
             try {
@@ -368,14 +356,15 @@ public class SocialController {
     @PostMapping(value = "/user/profile/upload-and-update", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<?> uploadAndUpdateProfile(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username, @RequestParam("file") MultipartFile file) {
         try {
+            // 🟢 FORCE CACHE: Profile update guarantees we remember them
+            redisTemplate.opsForValue().set("user:id_to_name:" + userId, username.trim().toLowerCase(), java.time.Duration.ofDays(30));
+
             Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
             String newPicUrl = (String) blobResponse.get("mediaUrl");
             if (newPicUrl == null || newPicUrl.isEmpty()) throw new IllegalStateException("Empty URL");
             userCatalogClient.updateInternalAvatar(username.trim().toLowerCase(), Map.of("profilePictureUrl", newPicUrl));
 
-            // 🟢 Sync both caches instantly
             redisTemplate.opsForValue().set("user:avatar:" + username.trim().toLowerCase(), newPicUrl, java.time.Duration.ofHours(24));
-            redisTemplate.opsForValue().set("user:avatar:" + userId, newPicUrl, java.time.Duration.ofHours(24));
 
             return ResponseEntity.ok(Map.of("status", "SUCCESS", "avatarUrl", newPicUrl));
         } catch (Exception e) {
@@ -386,6 +375,9 @@ public class SocialController {
     @PostMapping(value = "/post/upload-and-create", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<?> uploadAndCreatePost(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username, @RequestParam("file") MultipartFile file, @RequestParam("title") String title, @RequestParam("content") String content, @RequestParam("cityName") String cityName, @RequestParam("country") String country) {
         try {
+            // 🟢 FORCE CACHE
+            redisTemplate.opsForValue().set("user:id_to_name:" + userId, username.trim().toLowerCase(), java.time.Duration.ofDays(30));
+
             Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
             Post post = new Post();
             post.setTitle(title);
