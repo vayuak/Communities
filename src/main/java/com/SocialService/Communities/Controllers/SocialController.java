@@ -39,6 +39,66 @@ public class SocialController {
     private final BlobClient blobClient;
     private final ProfileCacheService profileCacheService;
 
+    // 🟢 SELF-HEALING: Redis-First Avatar Resolver with Negative Caching
+    private String resolveAndCacheAvatar(String username) {
+        if (username == null || username.isBlank()) return null;
+        String cleanName = username.trim().toLowerCase();
+        String redisKey = "user:avatar:" + cleanName;
+
+        // 1. Bypass DB completely if in Redis
+        Object cachedAvatar = redisTemplate.opsForValue().get(redisKey);
+        if (cachedAvatar != null) {
+            return cachedAvatar.equals("NO_AVATAR") ? null : (String) cachedAvatar;
+        }
+
+        // 2. Network Fetch if missing
+        try {
+            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanName);
+            if (remoteUser != null && !remoteUser.isEmpty() && remoteUser.get(0).get("profilePictureUrl") != null) {
+                String fetchedAvatar = (String) remoteUser.get(0).get("profilePictureUrl");
+                redisTemplate.opsForValue().set(redisKey, fetchedAvatar, java.time.Duration.ofHours(24));
+                return fetchedAvatar;
+            }
+        } catch (Exception ignored) {}
+
+        // 3. Negative Cache to prevent DB flooding
+        redisTemplate.opsForValue().set(redisKey, "NO_AVATAR", java.time.Duration.ofHours(1));
+        return null;
+    }
+
+    // 🟢 SELF-HEALING: Redis-First ID-to-Username Resolver
+    private String resolveAndCacheUsername(Long userId) {
+        String redisKey = "user:id_to_name:" + userId;
+
+        // 1. Bypass DB completely if in Redis
+        Object cachedName = redisTemplate.opsForValue().get(redisKey);
+        if (cachedName != null) return (String) cachedName;
+
+        // 2. Fetch from DB
+        try {
+            String uname = jdbcTemplate.queryForObject("SELECT username FROM posts WHERE user_id = ? LIMIT 1", String.class, userId);
+            if (uname != null && !uname.trim().isEmpty()) {
+                redisTemplate.opsForValue().set(redisKey, uname, java.time.Duration.ofHours(24));
+                return uname;
+            }
+        } catch (Exception ignored) {}
+
+        // 3. Fallback to Catalog
+        try {
+            List<Map<String, Object>> remoteUsers = userCatalogClient.searchUsersByHandle(String.valueOf(userId));
+            if (remoteUsers != null && !remoteUsers.isEmpty() && remoteUsers.get(0).get("username") != null) {
+                String uname = (String) remoteUsers.get(0).get("username");
+                redisTemplate.opsForValue().set(redisKey, uname, java.time.Duration.ofHours(24));
+                return uname;
+            }
+        } catch (Exception ignored) {}
+
+        // 4. Default Fallback
+        String fallback = "user" + userId;
+        redisTemplate.opsForValue().set(redisKey, fallback, java.time.Duration.ofHours(1));
+        return fallback;
+    }
+
     @GetMapping(value = "/notifications/subscribe", produces = org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter subscribeToNotificationStream(@RequestAttribute("userId") Long userId) {
         return notificationRegistryService.registerClient(userId);
@@ -61,6 +121,12 @@ public class SocialController {
         if (input.startsWith("@") && input.length() > 1) {
             String targetHandle = input.substring(1).trim().toLowerCase();
             List<Map<String, Object>> remoteUsers = userCatalogClient.searchUsersByHandle(targetHandle);
+
+            // Sync DPs to Cache
+            if (remoteUsers != null && !remoteUsers.isEmpty() && remoteUsers.get(0).get("profilePictureUrl") != null) {
+                redisTemplate.opsForValue().set("user:avatar:" + targetHandle, remoteUsers.get(0).get("profilePictureUrl"), java.time.Duration.ofHours(24));
+            }
+
             targetPayload.put("type", "USERS");
             targetPayload.put("results", remoteUsers);
             return ResponseEntity.ok(targetPayload);
@@ -73,10 +139,7 @@ public class SocialController {
         Set<String> uniqueUsernames = livePosts.stream().map(p -> (String) p.get("username")).collect(Collectors.toSet());
         Map<String, String> avatarMap = new HashMap<>();
         for (String uname : uniqueUsernames) {
-            try {
-                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
-                if (remoteUser != null && !remoteUser.isEmpty()) avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
-            } catch (Exception ignored) {}
+            avatarMap.put(uname, resolveAndCacheAvatar(uname));
         }
         livePosts.forEach(post -> post.put("avatarUrl", avatarMap.get((String) post.get("username"))));
 
@@ -89,7 +152,7 @@ public class SocialController {
     public ResponseEntity<?> updateProfileDataDirectly(@RequestAttribute("userId") Long userId, @RequestBody Map<String, String> body) {
         try {
             String newPic = body.get("profilePictureUrl");
-            if (newPic != null) redisTemplate.opsForHash().put("user:profile:" + userId, "avatarUrl", newPic);
+            if (newPic != null) redisTemplate.opsForValue().set("user:avatar:" + userId, newPic, java.time.Duration.ofHours(24));
             return ResponseEntity.ok(Map.of("status", "SUCCESS"));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
@@ -139,9 +202,6 @@ public class SocialController {
         }
     }
 
-    /**
-     * FIX: No more SQL Grammar Crashes. Maps User_ID to Username seamlessly.
-     */
     @GetMapping("/post/{postId}/comments")
     public ResponseEntity<List<com.SocialService.Communities.DTOs.CommentResponseDTO>> getComments(@PathVariable Long postId) {
         String sql = "SELECT id, content, parent_id, created_at, user_id FROM comments WHERE post_id = ? ORDER BY created_at ASC";
@@ -153,37 +213,13 @@ public class SocialController {
                     .collect(Collectors.toSet());
 
             Map<Long, String> userIdToUsernameMap = new HashMap<>();
-
-            // Fast Bulk Handle Map from Local Posts Table
-            if (!uniqueUserIds.isEmpty()) {
-                String inSql = String.join(",", java.util.Collections.nCopies(uniqueUserIds.size(), "?"));
-                String userLookupSql = String.format("SELECT DISTINCT user_id, username FROM posts WHERE user_id IN (%s)", inSql);
-                jdbcTemplate.query(userLookupSql, uniqueUserIds.toArray(), (rs) -> {
-                    userIdToUsernameMap.put(rs.getLong("user_id"), rs.getString("username"));
-                });
-            }
-
-            // Fallback to Redis Profile Cache if user hasn't posted
-            for (Long uid : uniqueUserIds) {
-                if (!userIdToUsernameMap.containsKey(uid)) {
-                    Map<String, String> cached = profileCacheService.getUserProfileSummary(uid);
-                    if (cached != null && !cached.getOrDefault("username", "AnonymousTraveler").equals("AnonymousTraveler")) {
-                        userIdToUsernameMap.put(uid, cached.get("username"));
-                    }
-                }
-            }
-
-            // Resolve Real Avatars
             Map<String, String> avatarMap = new HashMap<>();
-            for (String uname : userIdToUsernameMap.values()) {
-                if (uname != null && !uname.trim().isEmpty()) {
-                    try {
-                        List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
-                        if (remoteUser != null && !remoteUser.isEmpty()) {
-                            avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
-                        }
-                    } catch (Exception ignored) {}
-                }
+
+            // 🟢 Lightning-fast O(1) Redis Resolution for Comments
+            for (Long uid : uniqueUserIds) {
+                String uname = resolveAndCacheUsername(uid);
+                userIdToUsernameMap.put(uid, uname);
+                avatarMap.put(uname, resolveAndCacheAvatar(uname));
             }
 
             List<com.SocialService.Communities.DTOs.CommentResponseDTO> allComments = new java.util.ArrayList<>();
@@ -193,12 +229,6 @@ public class SocialController {
             for (Map<String, Object> row : rows) {
                 Long commentUserId = ((Number) row.get("user_id")).longValue();
                 String resolvedUsername = userIdToUsernameMap.get(commentUserId);
-
-                // Final safety fallback
-                if (resolvedUsername == null || resolvedUsername.trim().isEmpty()) {
-                    resolvedUsername = "User_" + commentUserId;
-                }
-
                 Object parentObj = row.get("parent_id");
                 Object createdObj = row.get("created_at");
 
@@ -236,9 +266,6 @@ public class SocialController {
         }
     }
 
-    /**
-     * FIX: Robust URI decoding and fallback objects stop the HTTP 404s dead in their tracks.
-     */
     @GetMapping({
             "/user/{username}/full-profile",
             "/user/{username}/full-profile/"
@@ -246,7 +273,6 @@ public class SocialController {
     public ResponseEntity<?> getFullProfile(@PathVariable String username) {
         Map<String, Object> response = new HashMap<>();
 
-        // 🟢 FIX: Decode safely and assign to a final variable for the lambda
         String tempDecoded;
         try {
             tempDecoded = java.net.URLDecoder.decode(username, java.nio.charset.StandardCharsets.UTF_8);
@@ -255,17 +281,16 @@ public class SocialController {
         }
         final String cleanUsername = tempDecoded.replace("@", "").trim().toLowerCase();
 
-        log.info("  [FULL PROFILE FETCH] Clean Handle: '{}'", cleanUsername);
-
         try {
             Map<String, Object> safeProfile = new HashMap<>();
-            String liveAvatarUrl = null;
+
+            // 🟢 Redis Cache Call
+            String liveAvatarUrl = resolveAndCacheAvatar(cleanUsername);
 
             try {
                 List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanUsername);
                 if (remoteUser != null && !remoteUser.isEmpty()) {
                     safeProfile = new HashMap<>(remoteUser.get(0));
-                    liveAvatarUrl = (String) safeProfile.get("profilePictureUrl");
                 }
             } catch (Exception e) {
                 log.warn("Feign user catalog lookup failed for {}: {}", cleanUsername, e.getMessage());
@@ -273,10 +298,10 @@ public class SocialController {
 
             if (safeProfile.isEmpty()) {
                 safeProfile.put("username", cleanUsername);
-                safeProfile.put("profilePictureUrl", null);
             }
 
             safeProfile.put("avatarUrl", liveAvatarUrl);
+            safeProfile.put("profilePictureUrl", liveAvatarUrl);
             response.put("profile", safeProfile);
 
             String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", " +
@@ -284,11 +309,9 @@ public class SocialController {
                     "FROM posts WHERE LOWER(username) = LOWER(?) ORDER BY created_at DESC";
 
             List<Map<String, Object>> userPosts = jdbcTemplate.queryForList(sql, cleanUsername);
-            final String finalAvatar = liveAvatarUrl;
 
             userPosts.forEach(post -> {
-                post.put("avatarUrl", finalAvatar);
-                // cleanUsername is now effectively final and safe for this lambda
+                post.put("avatarUrl", liveAvatarUrl);
                 post.put("username", cleanUsername);
             });
 
@@ -296,24 +319,22 @@ public class SocialController {
             return ResponseEntity.ok(response);
 
         } catch (Exception e) {
-            log.error("Profile aggregation failed for {}: {}", cleanUsername, e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("error", "Failed to aggregate profile: " + e.getMessage()));
         }
     }
-    // Other standard endpoints (unchanged, intact)
+
     @GetMapping("/feed")
     public ResponseEntity<List<Map<String, Object>>> getCityFeed(@RequestParam String city, @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "10") int size) {
         String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE LOWER(city_name) = LOWER(?) ORDER BY created_at DESC LIMIT ? OFFSET ?";
         List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, city.trim(), size, page * size);
         Set<String> uniqueUsernames = livePosts.stream().map(p -> (String) p.get("username")).collect(Collectors.toSet());
         Map<String, String> avatarMap = new HashMap<>();
+
         for (String uname : uniqueUsernames) {
-            try {
-                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(uname.trim().toLowerCase());
-                if (remoteUser != null && !remoteUser.isEmpty()) avatarMap.put(uname, (String) remoteUser.get(0).get("profilePictureUrl"));
-            } catch (Exception ignored) {}
+            avatarMap.put(uname, resolveAndCacheAvatar(uname));
         }
+
         livePosts.forEach(post -> post.put("avatarUrl", avatarMap.get((String) post.get("username"))));
         return ResponseEntity.ok(livePosts);
     }
@@ -323,13 +344,8 @@ public class SocialController {
         String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?";
         List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, userId, size, page * size);
         if (!livePosts.isEmpty()) {
-            try {
-                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(((String) livePosts.get(0).get("username")).trim().toLowerCase());
-                if (remoteUser != null && !remoteUser.isEmpty()) {
-                    String liveAvatar = (String) remoteUser.get(0).get("profilePictureUrl");
-                    livePosts.forEach(post -> post.put("avatarUrl", liveAvatar));
-                }
-            } catch (Exception ignored) {}
+            String liveAvatar = resolveAndCacheAvatar((String) livePosts.get(0).get("username"));
+            livePosts.forEach(post -> post.put("avatarUrl", liveAvatar));
         }
         return ResponseEntity.ok(livePosts);
     }
@@ -356,7 +372,11 @@ public class SocialController {
             String newPicUrl = (String) blobResponse.get("mediaUrl");
             if (newPicUrl == null || newPicUrl.isEmpty()) throw new IllegalStateException("Empty URL");
             userCatalogClient.updateInternalAvatar(username.trim().toLowerCase(), Map.of("profilePictureUrl", newPicUrl));
-            redisTemplate.opsForHash().put("user:profile:" + userId, "avatarUrl", newPicUrl);
+
+            // 🟢 Sync both caches instantly
+            redisTemplate.opsForValue().set("user:avatar:" + username.trim().toLowerCase(), newPicUrl, java.time.Duration.ofHours(24));
+            redisTemplate.opsForValue().set("user:avatar:" + userId, newPicUrl, java.time.Duration.ofHours(24));
+
             return ResponseEntity.ok(Map.of("status", "SUCCESS", "avatarUrl", newPicUrl));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
@@ -406,10 +426,7 @@ public class SocialController {
     public ResponseEntity<?> getSinglePost(@PathVariable Long postId) {
         try {
             Map<String, Object> post = jdbcTemplate.queryForMap("SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE id = ?", postId);
-            try {
-                List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(((String) post.get("username")).trim().toLowerCase());
-                if (remoteUser != null && !remoteUser.isEmpty()) post.put("avatarUrl", remoteUser.get(0).get("profilePictureUrl"));
-            } catch (Exception ignored) {}
+            post.put("avatarUrl", resolveAndCacheAvatar((String) post.get("username")));
             return ResponseEntity.ok(post);
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Post not found."));
@@ -419,9 +436,15 @@ public class SocialController {
     @GetMapping("/user/{username}/profile")
     public ResponseEntity<?> getUserProfileData(@PathVariable String username) {
         try {
-            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(username.trim().toLowerCase());
+            String cleanName = username.trim().toLowerCase();
+            List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanName);
             if (remoteUser != null && !remoteUser.isEmpty()) {
                 Map<String, Object> safeProfile = new HashMap<>(remoteUser.get(0));
+
+                if (safeProfile.get("profilePictureUrl") != null) {
+                    redisTemplate.opsForValue().set("user:avatar:" + cleanName, safeProfile.get("profilePictureUrl"), java.time.Duration.ofHours(24));
+                }
+
                 safeProfile.put("avatarUrl", safeProfile.get("profilePictureUrl"));
                 return ResponseEntity.ok(safeProfile);
             }
