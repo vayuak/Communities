@@ -26,7 +26,7 @@ public class SocialServiceImpl implements SocialService {
 
     private final PostRepository postRepository;
     private final CommentRepository commentRepository;
-
+    private final SafetyAlertRepository safetyAlertRepository;
     private final PeerVouchRepository peerVouchRepository;
 
     private final RedisTemplate<String, Object> redisTemplate;
@@ -323,5 +323,41 @@ public class SocialServiceImpl implements SocialService {
         }
 
         return sortedNestingList;
+    }
+    // Make sure to inject the repository at the top of SocialServiceImpl:
+    // private final SafetyAlertRepository safetyAlertRepository;
+
+    @Override
+    @Transactional
+    public void submitReport(Long reporterId, String reporterUsername, Long targetPostId, String reason, String reporterCity) {
+        Post post = postRepository.findById(targetPostId)
+                .orElseThrow(() -> new RuntimeException("Target post does not exist."));
+
+        String postCity = post.getCityName();
+
+        // 🟢 PROOF-OF-PRESENCE WEIGHTING
+        int calculatedWeight = 1;
+        if (reporterCity == null || postCity == null || !reporterCity.trim().equalsIgnoreCase(postCity.trim())) {
+            log.warn("🛡️ ZERO-WEIGHT REPORT: Reporter @{} city ('{}') mismatch with post city ('{}')",
+                    reporterUsername, reporterCity, postCity);
+            calculatedWeight = 0; // Neutralizes remote bot campaigns
+        }
+
+        SafetyAlert alert = new SafetyAlert();
+        alert.setReporterId(reporterId);
+        alert.setTargetPostId(targetPostId);
+        alert.setCityName(postCity);
+        alert.setDangerSpot("POST_REPORT");
+        alert.setScamDescription("REPORT REASON: " + (reason != null ? reason : "Inappropriate Content"));
+        alert.setThreatLevel(calculatedWeight > 0 ? "MEDIUM" : "LOW");
+        alert.setReportWeight(calculatedWeight);
+
+        try {
+            safetyAlertRepository.save(alert);
+            log.info("🛡️ REPORT SAVED: User @{} -> Post {}. Weight: {}", reporterUsername, targetPostId, calculatedWeight);
+        } catch (org.springframework.dao.DataIntegrityViolationException e) {
+            // 🛡️ ANTI-CAMPAIGN UNIQUE CONSTRAINT: Duplicate reports from same user are dropped
+            log.warn("🛡️ DUPLICATE REPORT DROPPED: User @{} already reported post {}", reporterUsername, targetPostId);
+        }
     }
 }

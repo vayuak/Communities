@@ -445,4 +445,33 @@ public class SocialController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
         }
     }
+    @PostMapping("/moderation/report")
+    public ResponseEntity<?> handleModerationReport(
+            @RequestBody Map<String, Object> payload,
+            @RequestAttribute("userId") Long reporterId,
+            @RequestAttribute("username") String reporterUsername,
+            @RequestHeader(value = "X-User-City", required = false) String reporterCity) {
+        try {
+            Long targetPostId = null;
+            if (payload.containsKey("targetId") && payload.get("targetId") != null) {
+                targetPostId = Long.valueOf(payload.get("targetId").toString());
+            } else if (payload.containsKey("targetPostId") && payload.get("targetPostId") != null) {
+                targetPostId = Long.valueOf(payload.get("targetPostId").toString());
+            }
+
+            if (targetPostId == null) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Target ID missing."));
+            }
+
+            String reason = (String) payload.getOrDefault("reason", "Inappropriate Content");
+
+            socialService.submitReport(reporterId, reporterUsername, targetPostId, reason, reporterCity);
+
+            return ResponseEntity.ok(Map.of("status", "SUCCESS", "message", "Report logged for review."));
+        } catch (Exception e) {
+            log.error("Report processing error: {}", e.getMessage());
+            // Always return 200 to trick weaponized bot campaigns into thinking their report went through
+            return ResponseEntity.ok(Map.of("status", "SUCCESS", "message", "Report logged for review."));
+        }
+    }
 }
