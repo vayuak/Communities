@@ -324,8 +324,7 @@ public class SocialServiceImpl implements SocialService {
 
         return sortedNestingList;
     }
-    // Make sure to inject the repository at the top of SocialServiceImpl:
-    // private final SafetyAlertRepository safetyAlertRepository;
+
 
     @Override
     @Transactional
