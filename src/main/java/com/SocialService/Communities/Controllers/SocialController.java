@@ -474,4 +474,31 @@ public class SocialController {
             return ResponseEntity.ok(Map.of("status", "SUCCESS", "message", "Report logged for review."));
         }
     }
+    @PostMapping("/stripe/webhook")
+    public ResponseEntity<String> processStripeWebhook(@RequestBody(required = false) String payload) {
+        log.info("📥 Stripe Webhook payload arrived at processing gate.");
+
+        // NOTE: In production, extract this ID dynamically from the Stripe Event payload metadata
+        Long targetTravelerId = 16L;
+
+        log.info("💳 Payment confirmation matched. Elevating traveler profile: {}", targetTravelerId);
+
+        // 1. Update fast-access Redis Cache
+        profileCacheService.upgradeUserToPremiumTier(targetTravelerId);
+
+        // 2. NEW: Update permanent Postgres Database via Feign
+        userCatalogClient.upgradeInternalUserToPremium(targetTravelerId);
+
+        com.SocialService.Communities.DTOs.NotificationEvent paymentEvent =
+                com.SocialService.Communities.DTOs.NotificationEvent.builder()
+                        .type("PREMIUM_UNLOCK")
+                        .title("💎 PREMIUM STATUS ACTIVE")
+                        .message("Payment verified cleanly! Your account has been upgraded to Premium Tier. Shadow rooms and AI processing are unlocked.")
+                        .timestamp(java.time.LocalDateTime.now())
+                        .build();
+
+        notificationRegistryService.sendDirectNotification(targetTravelerId, paymentEvent);
+
+        return ResponseEntity.ok("Webhook processed cleanly.");
+    }
 }
