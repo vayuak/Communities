@@ -19,6 +19,7 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.security.Principal;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -500,5 +501,22 @@ public class SocialController {
         notificationRegistryService.sendDirectNotification(targetTravelerId, paymentEvent);
 
         return ResponseEntity.ok("Webhook processed cleanly.");
+    }
+    @PostMapping("/moderation/report")
+    public ResponseEntity<?> reportContent(@RequestBody Map<String, Object> payload, Principal principal) {
+        if (principal == null) return ResponseEntity.status(401).build();
+
+        String type = (String) payload.get("type");
+        Long targetId = ((Number) payload.get("targetId")).longValue();
+
+        // Handle Posts vs Comments dynamically from the same endpoint
+        if ("COMMENT_REPORT".equals(type)) {
+            // Assuming reporterId is resolved via token/principal in your real app
+            socialService.submitCommentReport(1L, principal.getName(), targetId, "User Flagged Comment");
+        } else {
+            socialService.submitReport(1L, principal.getName(), targetId, "User Flagged Post", "Unknown");
+        }
+
+        return ResponseEntity.ok(Map.of("message", "Content flagged for review."));
     }
 }

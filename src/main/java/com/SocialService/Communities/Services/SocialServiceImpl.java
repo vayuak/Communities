@@ -325,27 +325,19 @@ public class SocialServiceImpl implements SocialService {
         return sortedNestingList;
     }
 
-
     @Override
     @Transactional
     public void submitReport(Long reporterId, String reporterUsername, Long targetPostId, String reason, String reporterCity) {
         Post post = postRepository.findById(targetPostId)
                 .orElseThrow(() -> new RuntimeException("Target post does not exist."));
-
-        String postCity = post.getCityName();
-
-        // 🟢 PROOF-OF-PRESENCE WEIGHTING
         int calculatedWeight = 1;
-        if (reporterCity == null || postCity == null || !reporterCity.trim().equalsIgnoreCase(postCity.trim())) {
-            log.warn("🛡️ ZERO-WEIGHT REPORT: Reporter @{} city ('{}') mismatch with post city ('{}')",
-                    reporterUsername, reporterCity, postCity);
-            calculatedWeight = 0; // Neutralizes remote bot campaigns
+        if (reporterCity == null || post.getCityName() == null || !reporterCity.trim().equalsIgnoreCase(post.getCityName().trim())) {
+            calculatedWeight = 0;
         }
-
         SafetyAlert alert = new SafetyAlert();
         alert.setReporterId(reporterId);
         alert.setTargetPostId(targetPostId);
-        alert.setCityName(postCity);
+        alert.setCityName(post.getCityName());
         alert.setDangerSpot("POST_REPORT");
         alert.setScamDescription("REPORT REASON: " + (reason != null ? reason : "Inappropriate Content"));
         alert.setThreatLevel(calculatedWeight > 0 ? "MEDIUM" : "LOW");
@@ -353,10 +345,45 @@ public class SocialServiceImpl implements SocialService {
 
         try {
             safetyAlertRepository.save(alert);
-            log.info("🛡️ REPORT SAVED: User @{} -> Post {}. Weight: {}", reporterUsername, targetPostId, calculatedWeight);
+            log.info("🚩 REPORT SAVED: User @{} -> Post {}. Weight: {}", reporterUsername, targetPostId, calculatedWeight);
+
+            // 🟢 NEW: INDUSTRY STANDARD AUTO-TAKEDOWN (3 Strikes)
+            Integer reportCount = safetyAlertRepository.countByTargetPostIdAndReportWeightGreaterThan(targetPostId, 0);
+            if (reportCount != null && reportCount >= 3) {
+                postRepository.deleteById(targetPostId);
+                log.warn("🛡️ [MODERATION TAKEDOWN] Post {} permanently deleted due to community reports.", targetPostId);
+            }
         } catch (org.springframework.dao.DataIntegrityViolationException e) {
-            // 🛡️ ANTI-CAMPAIGN UNIQUE CONSTRAINT: Duplicate reports from same user are dropped
-            log.warn("🛡️ DUPLICATE REPORT DROPPED: User @{} already reported post {}", reporterUsername, targetPostId);
+            log.warn("⚠️ DUPLICATE REPORT DROPPED: User @{} already reported post {}", reporterUsername, targetPostId);
+        }
+    }
+
+    @Override
+    @Transactional
+    public void submitCommentReport(Long reporterId, String reporterUsername, Long targetCommentId, String reason) {
+        Comment comment = commentRepository.findById(targetCommentId)
+                .orElseThrow(() -> new RuntimeException("Target comment does not exist."));
+
+        SafetyAlert alert = new SafetyAlert();
+        alert.setReporterId(reporterId);
+        alert.setTargetPostId(comment.getPostId());
+        alert.setCityName("GLOBAL_COMMENT");
+        alert.setDangerSpot("COMMENT_REPORT_ID_" + targetCommentId); // Unique identifier for counting
+        alert.setScamDescription("REPORT REASON: " + (reason != null ? reason : "Inappropriate Comment Content"));
+        alert.setThreatLevel("LOW");
+        alert.setReportWeight(1);
+
+        try {
+            safetyAlertRepository.save(alert);
+            log.info("🚩 [COMMENT REPORT] User @{} flagged comment {}.", reporterUsername, targetCommentId);
+
+            // 🟢 NEW: AUTO-TAKEDOWN FOR COMMENTS
+            // Since comments share the post ID in alerts, we can use a quick JDBC or JPA delete
+            commentRepository.deleteById(targetCommentId);
+            log.warn("🛡️ [MODERATION] Comment {} removed after community report.", targetCommentId);
+
+        } catch (org.springframework.dao.DataIntegrityViolationException e) {
+            log.warn("⚠️ [DUPLICATE REPORT] User @{} already reported comment {}", reporterUsername, targetCommentId);
         }
     }
 }

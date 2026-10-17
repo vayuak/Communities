@@ -23,7 +23,7 @@ public interface SocialService {
     void incrementShareCount(Long postId);
     Page<FeedPostDTO> getPersonalTimeline(Long targetUserId, Pageable pageable, Long currentUserId);
     List<CommentResponseDTO> getPostComments(Long postId);
-
-    // 🟢 REPORT SYSTEM INTEGRATION
+    // REPORT SYSTEM INTEGRATION
     void submitReport(Long reporterId, String reporterUsername, Long targetPostId, String reason, String reporterCity);
+    void submitCommentReport(Long reporterId, String reporterUsername, Long targetCommentId, String reason); // 🟢 ADD THIS LINE
 }
