@@ -1,5 +1,6 @@
 package com.SocialService.Communities.Services;
 
+import com.SocialService.Communities.Clients.UserCatalogClient;
 import com.SocialService.Communities.DTOs.CommentResponseDTO;
 import com.SocialService.Communities.Models.*;
 import com.SocialService.Communities.Repositories.*;
@@ -28,13 +29,10 @@ public class SocialServiceImpl implements SocialService {
     private final CommentRepository commentRepository;
     private final SafetyAlertRepository safetyAlertRepository;
     private final PeerVouchRepository peerVouchRepository;
-
+    private final CommentReportRepository commentReportRepository;
     private final RedisTemplate<String, Object> redisTemplate;
     private final ProfileCacheService profileCacheService;
-
-    // ==========================================
-    // 🌍 CORE SUBMISSION ENGINE & FEED MANAGEMENT
-    // ==========================================
+    private final UserCatalogClient userCatalogClient;
     @Override
     @Transactional
     public Post createPost(Post post, Long userId) {
@@ -44,7 +42,6 @@ public class SocialServiceImpl implements SocialService {
         if (post.getCityName() == null || post.getCityName().trim().isEmpty()) {
             throw new RuntimeException("Target city is mandatory.");
         }
-
         if (post.getTitle() != null && post.getTitle().length() > 20) {
             throw new RuntimeException("Title too long. Max 20 characters.");
         }
@@ -81,14 +78,12 @@ public class SocialServiceImpl implements SocialService {
 
         return rawPosts.map(post -> {
             Map<String, String> authorProfile = profileCacheService.getUserProfileSummary(post.getUserId());
-
             String userVote = "NONE";
             if (post.getUpvotes() != null && post.getUpvotes().contains(currentUserId)) {
                 userVote = "up";
             } else if (post.getDownvotes() != null && post.getDownvotes().contains(currentUserId)) {
                 userVote = "down";
             }
-
             return FeedPostDTO.builder()
                     .id(post.getId())
                     .userId(post.getUserId())
@@ -111,17 +106,14 @@ public class SocialServiceImpl implements SocialService {
     @Override
     public Page<FeedPostDTO> getPersonalTimeline(Long targetUserId, Pageable pageable, Long currentUserId) {
         Page<Post> rawPosts = postRepository.findByUserIdOrderByCreatedAtDesc(targetUserId, pageable);
-
         return rawPosts.map(post -> {
             Map<String, String> authorProfile = profileCacheService.getUserProfileSummary(post.getUserId());
-
             String userVote = "NONE";
             if (post.getUpvotes() != null && post.getUpvotes().contains(currentUserId)) {
                 userVote = "up";
             } else if (post.getDownvotes() != null && post.getDownvotes().contains(currentUserId)) {
                 userVote = "down";
             }
-
             return FeedPostDTO.builder()
                     .id(post.getId())
                     .userId(post.getUserId())
@@ -144,41 +136,31 @@ public class SocialServiceImpl implements SocialService {
     @Override
     @Transactional
     public String votePost(Long postId, Long userId, String direction) {
-        Post post = postRepository.findById(postId)
-                .orElseThrow(() -> new RuntimeException("Post not found."));
-
+        Post post = postRepository.findById(postId).orElseThrow(() -> new RuntimeException("Post not found."));
         post.getUpvotes().remove(userId);
         post.getDownvotes().remove(userId);
-
         if ("UP".equalsIgnoreCase(direction)) {
             post.getUpvotes().add(userId);
         } else if ("DOWN".equalsIgnoreCase(direction)) {
             post.getDownvotes().add(userId);
         }
-
         post.setScore(post.getUpvotes().size() - post.getDownvotes().size());
         postRepository.save(post);
         return "Vote registered. Score: " + post.getScore();
     }
 
-    // 🟢 EVICTS STALE COMMENT CACHE FOR LEGACY COMMENT DISPATCH
     @Override
     @Transactional
     @CacheEvict(value = "post_comments", key = "#comment.postId")
     public Comment addComment(Comment comment, Long userId) {
         comment.setUserId(userId);
         Comment savedComment = commentRepository.save(comment);
-
-        Post post = postRepository.findById(comment.getPostId())
-                .orElseThrow(() -> new RuntimeException("Post not found for commenting."));
-
+        Post post = postRepository.findById(comment.getPostId()).orElseThrow(() -> new RuntimeException("Post not found for commenting."));
         post.setCommentCount(post.getCommentCount() + 1);
         postRepository.save(post);
-
         return savedComment;
     }
 
-    // 🟢 EVICTS TRUST STATUS CACHE FOR TARGET USER WHEN VOUCHED
     @Override
     @Transactional
     @CacheEvict(value = "trust_network", key = "#targetUserId")
@@ -187,10 +169,8 @@ public class SocialServiceImpl implements SocialService {
         if (peerVouchRepository.existsByVoucherIdAndTargetUserId(voucherId, targetUserId)) {
             throw new RuntimeException("Already vouched for this user.");
         }
-
         PeerVouch vouch = PeerVouch.builder().voucherId(voucherId).targetUserId(targetUserId).locationContext(location).build();
         peerVouchRepository.save(vouch);
-
         long totalVouches = peerVouchRepository.countByTargetUserId(targetUserId);
         if (totalVouches >= 3) {
             profileCacheService.elevateUserToVerifiedResident(targetUserId);
@@ -199,7 +179,6 @@ public class SocialServiceImpl implements SocialService {
         return "Vouch recorded. Total: " + totalVouches + "/3";
     }
 
-    // 🟢 CACHES TRUST STATUS SUMMARY
     @Override
     @Cacheable(value = "trust_network", key = "#userId")
     public Map<String, Object> getTrustNetworkStatus(Long userId) {
@@ -218,23 +197,17 @@ public class SocialServiceImpl implements SocialService {
         return (String) redisTemplate.opsForHash().get("user:public_keys", userId.toString());
     }
 
-    // ==========================================
-    // 🔍 POLYMORPHIC CRIMINOLOGY MATRIX SEARCH
-    // ==========================================
     @Override
     public Page<FeedPostDTO> searchThreatMatrix(String keyword, Pageable pageable, Long currentUserId) {
         Page<Post> rawPosts = postRepository.searchGlobalScams(keyword.trim(), pageable);
-
         return rawPosts.map(post -> {
             Map<String, String> authorProfile = profileCacheService.getUserProfileSummary(post.getUserId());
-
             String userVote = "NONE";
             if (post.getUpvotes() != null && post.getUpvotes().contains(currentUserId)) {
                 userVote = "up";
             } else if (post.getDownvotes() != null && post.getDownvotes().contains(currentUserId)) {
                 userVote = "down";
             }
-
             return FeedPostDTO.builder()
                     .id(post.getId())
                     .userId(post.getUserId())
@@ -257,47 +230,34 @@ public class SocialServiceImpl implements SocialService {
     @Override
     @Transactional
     public void incrementShareCount(Long postId) {
-        Post post = postRepository.findById(postId)
-                .orElseThrow(() -> new RuntimeException("Post not found."));
+        Post post = postRepository.findById(postId).orElseThrow(() -> new RuntimeException("Post not found."));
         post.setShareCount(post.getShareCount() + 1);
         postRepository.save(post);
     }
 
-    // 🟢 EVICTS STALE COMMENT CACHE WHEN A NEW SECURE COMMENT IS ADDED
     @Override
     @Transactional
     @CacheEvict(value = "post_comments", key = "#postId")
     public Comment addSecureComment(Long postId, Long userId, String content, Long parentId) {
-        Post post = postRepository.findById(postId)
-                .orElseThrow(() -> new RuntimeException("Target post does not exist."));
-
+        Post post = postRepository.findById(postId).orElseThrow(() -> new RuntimeException("Target post does not exist."));
         Comment comment = new Comment();
         comment.setPostId(post.getId());
         comment.setUserId(userId);
         comment.setContent(content.trim());
         comment.setParentId(parentId);
         comment.setCreatedAt(LocalDateTime.now());
-
         Comment savedComment = commentRepository.save(comment);
-
         post.setCommentCount(post.getCommentCount() + 1);
         postRepository.save(post);
-
         return savedComment;
     }
 
-    // ==========================================
-    // 💬 COMMENT FETCHING & NESTING LOGIC
-    // ==========================================
-    // 🟢 CACHES THE ENTIRE NESTED COMMENT TREE BY POST ID
     @Override
     @Cacheable(value = "post_comments", key = "#postId")
     public List<CommentResponseDTO> getPostComments(Long postId) {
         List<Comment> rawComments = commentRepository.findByPostIdOrderByCreatedAtAsc(postId);
-
         List<CommentResponseDTO> mappedComments = rawComments.stream().map(comment -> {
             Map<String, String> authorProfile = profileCacheService.getUserProfileSummary(comment.getUserId());
-
             return CommentResponseDTO.builder()
                     .id(comment.getId())
                     .parentId(comment.getParentId())
@@ -309,11 +269,9 @@ public class SocialServiceImpl implements SocialService {
         }).collect(Collectors.toList());
 
         List<CommentResponseDTO> sortedNestingList = new ArrayList<>();
-
         for (CommentResponseDTO parent : mappedComments) {
             if (parent.getParentId() == null) {
                 sortedNestingList.add(parent);
-
                 for (CommentResponseDTO child : mappedComments) {
                     if (parent.getId().equals(child.getParentId())) {
                         sortedNestingList.add(child);
@@ -321,19 +279,18 @@ public class SocialServiceImpl implements SocialService {
                 }
             }
         }
-
         return sortedNestingList;
     }
-
     @Override
     @Transactional
     public void submitReport(Long reporterId, String reporterUsername, Long targetPostId, String reason, String reporterCity) {
-        Post post = postRepository.findById(targetPostId)
-                .orElseThrow(() -> new RuntimeException("Target post does not exist."));
+        Post post = postRepository.findById(targetPostId).orElseThrow(() -> new RuntimeException("Target post does not exist."));
+
         int calculatedWeight = 1;
         if (reporterCity == null || post.getCityName() == null || !reporterCity.trim().equalsIgnoreCase(post.getCityName().trim())) {
             calculatedWeight = 0;
         }
+
         SafetyAlert alert = new SafetyAlert();
         alert.setReporterId(reporterId);
         alert.setTargetPostId(targetPostId);
@@ -345,43 +302,46 @@ public class SocialServiceImpl implements SocialService {
 
         try {
             safetyAlertRepository.save(alert);
-            log.info("🚩 REPORT SAVED: User @{} -> Post {}. Weight: {}", reporterUsername, targetPostId, calculatedWeight);
+            log.info("🚩 REPORT SAVED: User @{} flagged Post {}.", reporterUsername, targetPostId);
 
-            // 🟢 NEW: INDUSTRY STANDARD AUTO-TAKEDOWN (3 Strikes)
-            Integer reportCount = safetyAlertRepository.countByTargetPostIdAndReportWeightGreaterThan(targetPostId, 0);
-            if (reportCount != null && reportCount >= 3) {
-                postRepository.deleteById(targetPostId);
-                log.warn("🛡️ [MODERATION TAKEDOWN] Post {} permanently deleted due to community reports.", targetPostId);
+            // 🟢 3-STRIKE AUTO-BAN (Does not delete post from DB)
+            String targetUser = post.getUsername();
+            Long strikes = redisTemplate.opsForValue().increment("user:strikes:" + targetUser);
+
+            if (strikes != null && strikes >= 3) {
+                userCatalogClient.blockInternalUser(targetUser);
+                log.warn("⛔ [AUTO-BAN] @{} reached 3 post strikes and was permanently banned.", targetUser);
             }
         } catch (org.springframework.dao.DataIntegrityViolationException e) {
-            log.warn("⚠️ DUPLICATE REPORT DROPPED: User @{} already reported post {}", reporterUsername, targetPostId);
+            log.warn("⚠️ DUPLICATE REPORT: User @{} already reported post {}", reporterUsername, targetPostId);
         }
     }
 
     @Override
     @Transactional
     public void submitCommentReport(Long reporterId, String reporterUsername, Long targetCommentId, String reason) {
-        Comment comment = commentRepository.findById(targetCommentId)
-                .orElseThrow(() -> new RuntimeException("Target comment does not exist."));
+        Comment comment = commentRepository.findById(targetCommentId).orElseThrow(() -> new RuntimeException("Target comment does not exist."));
 
-        SafetyAlert alert = new SafetyAlert();
-        alert.setReporterId(reporterId);
-        alert.setTargetPostId(comment.getPostId());
-        alert.setCityName("GLOBAL_COMMENT");
-        alert.setDangerSpot("COMMENT_REPORT_ID_" + targetCommentId); // Unique identifier for counting
-        alert.setScamDescription("REPORT REASON: " + (reason != null ? reason : "Inappropriate Comment Content"));
-        alert.setThreatLevel("LOW");
-        alert.setReportWeight(1);
+        CommentReport report = new CommentReport();
+        report.setReporterId(reporterId);
+        report.setTargetCommentId(targetCommentId);
+        report.setReason(reason != null ? reason : "Inappropriate Comment Content");
 
         try {
-            safetyAlertRepository.save(alert);
+            commentReportRepository.save(report);
             log.info("🚩 [COMMENT REPORT] User @{} flagged comment {}.", reporterUsername, targetCommentId);
 
-            // 🟢 NEW: AUTO-TAKEDOWN FOR COMMENTS
-            // Since comments share the post ID in alerts, we can use a quick JDBC or JPA delete
-            commentRepository.deleteById(targetCommentId);
-            log.warn("🛡️ [MODERATION] Comment {} removed after community report.", targetCommentId);
+            // 🟢 3-STRIKE AUTO-BAN (Does not delete comment from DB)
+            Map<String, String> authorProfile = profileCacheService.getUserProfileSummary(comment.getUserId());
+            String targetUser = authorProfile.getOrDefault("username", "Unknown");
 
+            if (!"Unknown".equals(targetUser)) {
+                Long strikes = redisTemplate.opsForValue().increment("user:strikes:" + targetUser);
+                if (strikes != null && strikes >= 3) {
+                    userCatalogClient.blockInternalUser(targetUser);
+                    log.warn("⛔ [AUTO-BAN] @{} reached 3 comment strikes and was permanently banned.", targetUser);
+                }
+            }
         } catch (org.springframework.dao.DataIntegrityViolationException e) {
             log.warn("⚠️ [DUPLICATE REPORT] User @{} already reported comment {}", reporterUsername, targetCommentId);
         }

@@ -1,4 +1,4 @@
-package com.SocialService.Communities.Repositories; // Or .Services depending on your package structure
+package com.SocialService.Communities.Repositories;
 
 import com.SocialService.Communities.DTOs.CommentResponseDTO;
 import com.SocialService.Communities.Models.Comment;
@@ -23,7 +23,8 @@ public interface SocialService {
     void incrementShareCount(Long postId);
     Page<FeedPostDTO> getPersonalTimeline(Long targetUserId, Pageable pageable, Long currentUserId);
     List<CommentResponseDTO> getPostComments(Long postId);
+
     // REPORT SYSTEM INTEGRATION
     void submitReport(Long reporterId, String reporterUsername, Long targetPostId, String reason, String reporterCity);
-    void submitCommentReport(Long reporterId, String reporterUsername, Long targetCommentId, String reason); // 🟢 ADD THIS LINE
+    void submitCommentReport(Long reporterId, String reporterUsername, Long targetCommentId, String reason);
 }

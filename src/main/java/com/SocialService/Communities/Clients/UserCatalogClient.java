@@ -19,4 +19,6 @@ public interface UserCatalogClient {
     void updateInternalAvatar(@RequestParam("username") String username, @RequestBody Map<String, String> payload);
     @PostMapping("/internal/premium/{userId}")
     void upgradeInternalUserToPremium(@PathVariable("userId") Long userId);
+    @PostMapping("/internal/block/{username}")
+    void blockInternalUser(@PathVariable("username") String username);
 }
