@@ -3,6 +3,7 @@ package com.SocialService.Communities.Controllers;
 import com.SocialService.Communities.Clients.UserCatalogClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import com.SocialService.Communities.Utilities.SafeUsers;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -66,8 +67,8 @@ public class ProfileBatchController {
             try {
                 List<Map<String, Object>> found = userCatalogClient.searchUsersByHandle(handle);
                 if (found != null && !found.isEmpty()) {
-                    Object url = found.get(0).get("profilePictureUrl");
-                    if (url == null) url = found.get(0).get("avatarUrl");
+                    Map<String, Object> exactUser = SafeUsers.exact(found, handle);
+                    Object url = exactUser == null ? null : exactUser.get("profilePictureUrl");
                     if (url != null && !url.toString().isBlank()) avatar = url.toString();
                 }
             } catch (Exception e) {
@@ -95,8 +96,8 @@ public class ProfileBatchController {
         try {
             List<Map<String, Object>> found = userCatalogClient.searchUsersByHandle(handle);
             if (found != null && !found.isEmpty()) {
-                Object url = found.get(0).get("profilePictureUrl");
-                if (url == null) url = found.get(0).get("avatarUrl");
+                Map<String, Object> exactUser = SafeUsers.exact(found, handle);
+                Object url = exactUser == null ? null : exactUser.get("profilePictureUrl");
                 if (url != null && !url.toString().isBlank()) avatar = url.toString();
             }
         } catch (Exception e) {

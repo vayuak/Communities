@@ -5,7 +5,6 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 
-// 🟢 Strict enforcement: Requires properties to be set
 @FeignClient(
         name = "${user.catalog.service.name}",
         url = "${user.catalog.service.url}",
@@ -19,6 +18,8 @@ public interface UserCatalogClient {
     void updateInternalAvatar(@RequestParam("username") String username, @RequestBody Map<String, String> payload);
     @PostMapping("/internal/premium/{userId}")
     void upgradeInternalUserToPremium(@PathVariable("userId") Long userId);
+    @DeleteMapping("/internal/user/{username}")
+    void deleteInternalUser(@PathVariable("username") String username);
     @PostMapping("/internal/block/{username}")
     void blockInternalUser(@PathVariable("username") String username);
 }

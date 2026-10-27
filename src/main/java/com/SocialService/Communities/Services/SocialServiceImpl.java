@@ -285,6 +285,7 @@ public class SocialServiceImpl implements SocialService {
     @Transactional
     public void submitReport(Long reporterId, String reporterUsername, Long targetPostId, String reason, String reporterCity) {
         Post post = postRepository.findById(targetPostId).orElseThrow(() -> new RuntimeException("Target post does not exist."));
+        if (reporterId != null && reporterId.equals(post.getUserId())) return;   // cannot report yourself
 
         int calculatedWeight = 1;
         if (reporterCity == null || post.getCityName() == null || !reporterCity.trim().equalsIgnoreCase(post.getCityName().trim())) {
@@ -301,16 +302,19 @@ public class SocialServiceImpl implements SocialService {
         alert.setReportWeight(calculatedWeight);
 
         try {
-            safetyAlertRepository.save(alert);
+            safetyAlertRepository.saveAndFlush(alert);   // flush now so a duplicate report fails HERE, before any strike is counted
             log.info("🚩 REPORT SAVED: User @{} flagged Post {}.", reporterUsername, targetPostId);
 
             // 🟢 3-STRIKE AUTO-BAN (Does not delete post from DB)
             String targetUser = post.getUsername();
-            Long strikes = redisTemplate.opsForValue().increment("user:strikes:" + targetUser);
+            // Count DISTINCT reporters only (one person cannot ban someone alone). Posts with 3+ distinct reporters are already
+            // hidden from feeds; an account is banned automatically at 5 distinct reporters across its content.
+            redisTemplate.opsForSet().add("user:strikers:" + targetUser, String.valueOf(reporterId));
+            Long strikes = redisTemplate.opsForSet().size("user:strikers:" + targetUser);
 
-            if (strikes != null && strikes >= 3) {
+            if (strikes != null && strikes >= 5) {
                 userCatalogClient.blockInternalUser(targetUser);
-                log.warn("⛔ [AUTO-BAN] @{} reached 3 post strikes and was permanently banned.", targetUser);
+                log.warn("[AUTO-BAN] @{} reached 5 distinct reporters and was banned.", targetUser);
             }
         } catch (org.springframework.dao.DataIntegrityViolationException e) {
             log.warn("⚠️ DUPLICATE REPORT: User @{} already reported post {}", reporterUsername, targetPostId);
@@ -322,13 +326,14 @@ public class SocialServiceImpl implements SocialService {
     public void submitCommentReport(Long reporterId, String reporterUsername, Long targetCommentId, String reason) {
         Comment comment = commentRepository.findById(targetCommentId).orElseThrow(() -> new RuntimeException("Target comment does not exist."));
 
+        if (reporterId != null && reporterId.equals(comment.getUserId())) return;   // cannot report yourself
         CommentReport report = new CommentReport();
         report.setReporterId(reporterId);
         report.setTargetCommentId(targetCommentId);
         report.setReason(reason != null ? reason : "Inappropriate Comment Content");
 
         try {
-            commentReportRepository.save(report);
+            commentReportRepository.saveAndFlush(report);
             log.info("🚩 [COMMENT REPORT] User @{} flagged comment {}.", reporterUsername, targetCommentId);
 
             // 🟢 3-STRIKE AUTO-BAN (Does not delete comment from DB)
@@ -336,10 +341,11 @@ public class SocialServiceImpl implements SocialService {
             String targetUser = authorProfile.getOrDefault("username", "Unknown");
 
             if (!"Unknown".equals(targetUser)) {
-                Long strikes = redisTemplate.opsForValue().increment("user:strikes:" + targetUser);
-                if (strikes != null && strikes >= 3) {
+                redisTemplate.opsForSet().add("user:strikers:" + targetUser, String.valueOf(reporterId));
+                Long strikes = redisTemplate.opsForSet().size("user:strikers:" + targetUser);
+                if (strikes != null && strikes >= 5) {
                     userCatalogClient.blockInternalUser(targetUser);
-                    log.warn("⛔ [AUTO-BAN] @{} reached 3 comment strikes and was permanently banned.", targetUser);
+                    log.warn("[AUTO-BAN] @{} reached 5 distinct reporters and was banned.", targetUser);
                 }
             }
         } catch (org.springframework.dao.DataIntegrityViolationException e) {

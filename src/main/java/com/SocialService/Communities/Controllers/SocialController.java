@@ -7,6 +7,8 @@ import com.SocialService.Communities.Repositories.RadarContinentRepository;
 import com.SocialService.Communities.Repositories.SocialService;
 import com.SocialService.Communities.Services.ProfileCacheService;
 import com.SocialService.Communities.Clients.BlobClient;
+import com.SocialService.Communities.Utilities.PromoFilter;
+import com.SocialService.Communities.Utilities.SafeUsers;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.multipart.MultipartFile;
 import jakarta.validation.Valid;
@@ -54,8 +56,9 @@ public class SocialController {
 
         try {
             List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanName);
-            if (remoteUser != null && !remoteUser.isEmpty() && remoteUser.get(0).get("profilePictureUrl") != null) {
-                String fetchedAvatar = (String) remoteUser.get(0).get("profilePictureUrl");
+            Map<String, Object> exactUser = SafeUsers.exact(remoteUser, cleanName);
+            if (exactUser != null && exactUser.get("profilePictureUrl") != null) {
+                String fetchedAvatar = (String) exactUser.get("profilePictureUrl");
                 redisTemplate.opsForValue().set(redisKey, fetchedAvatar, java.time.Duration.ofHours(24));
                 return fetchedAvatar;
             }
@@ -95,17 +98,6 @@ public class SocialController {
         return notificationRegistryService.registerClient(userId);
     }
 
-    @PostMapping("/post/create")
-    public ResponseEntity<?> createPost(@RequestBody Post post, @RequestAttribute("userId") Long userId, @RequestAttribute("username") String username) {
-        try {
-            redisTemplate.opsForValue().set("user:id_to_name:" + userId, username.trim().toLowerCase(), java.time.Duration.ofDays(30));
-            return ResponseEntity.status(HttpStatus.CREATED).body(socialService.createPost(post, userId));
-        } catch (Exception e) {
-            log.error("Failed to create post", e);
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", e.getMessage()));
-        }
-    }
-
     @GetMapping("/search")
     public ResponseEntity<?> searchGlobalScamDatabase(@RequestParam String keyword, @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "15") int size, @RequestAttribute("userId") Long userId) {
         try {
@@ -117,11 +109,8 @@ public class SocialController {
                 String targetHandle = input.substring(1).trim().toLowerCase();
                 try {
                     List<Map<String, Object>> remoteUsers = userCatalogClient.searchUsersByHandle(targetHandle);
-                    if (remoteUsers != null && !remoteUsers.isEmpty() && remoteUsers.get(0).get("profilePictureUrl") != null) {
-                        redisTemplate.opsForValue().set("user:avatar:" + targetHandle, remoteUsers.get(0).get("profilePictureUrl"), java.time.Duration.ofHours(24));
-                    }
                     targetPayload.put("type", "USERS");
-                    targetPayload.put("results", remoteUsers != null ? remoteUsers : new ArrayList<>());
+                    targetPayload.put("results", SafeUsers.sanitize(remoteUsers));
                 } catch (Exception e) {
                     targetPayload.put("type", "USERS");
                     targetPayload.put("results", new ArrayList<>()); // Graceful degradation on Feign crash
@@ -130,7 +119,8 @@ public class SocialController {
             }
 
             // PATHWAY B: Post Search
-            String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE LOWER(content) LIKE LOWER(?) OR LOWER(title) LIKE LOWER(?) ORDER BY created_at DESC LIMIT ? OFFSET ?";
+            size = Math.min(Math.max(size, 1), 50); page = Math.max(page, 0);
+            String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE (LOWER(content) LIKE LOWER(?) OR LOWER(title) LIKE LOWER(?))" + NOT_FLAGGED + "ORDER BY created_at DESC LIMIT ? OFFSET ?";
             String searchParam = "%" + input + "%";
             List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, searchParam, searchParam, size, page * size);
 
@@ -204,6 +194,11 @@ public class SocialController {
             @RequestAttribute("userId") Long userId,
             @RequestAttribute("username") String username) {
         try {
+            String promo = PromoFilter.check(request.getContent());
+            if (promo != null) return ResponseEntity.badRequest().body(Map.of("error", promo));
+            if (!allow("rl:comment:" + userId, 60, java.time.Duration.ofHours(1))) {
+                return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Map.of("error", "You are commenting too fast. Please wait a bit."));
+            }
             redisTemplate.opsForValue().set("user:id_to_name:" + userId, username.trim().toLowerCase(), java.time.Duration.ofDays(30));
             com.SocialService.Communities.Models.Comment savedComment =
                     socialService.addSecureComment(postId, userId, request.getContent(), request.getParentId());
@@ -287,8 +282,9 @@ public class SocialController {
 
             try {
                 List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanUsername);
-                if (remoteUser != null && !remoteUser.isEmpty()) {
-                    safeProfile = new HashMap<>(remoteUser.get(0));
+                Map<String, Object> exactUser = SafeUsers.exact(remoteUser, cleanUsername);
+                if (exactUser != null) {
+                    safeProfile = new HashMap<>(exactUser);
                 }
             } catch (Exception e) {
                 log.warn("Feign user catalog lookup failed for {}: {}", cleanUsername, e.getMessage());
@@ -319,7 +315,8 @@ public class SocialController {
     @GetMapping("/feed")
     public ResponseEntity<?> getCityFeed(@RequestParam String city, @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "10") int size) {
         try {
-            String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE LOWER(city_name) = LOWER(?) ORDER BY created_at DESC LIMIT ? OFFSET ?";
+            size = Math.min(Math.max(size, 1), 50); page = Math.max(page, 0);
+            String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE LOWER(city_name) = LOWER(?)" + NOT_FLAGGED + "ORDER BY created_at DESC LIMIT ? OFFSET ?";
             List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, city.trim(), size, page * size);
 
             Set<String> uniqueUsernames = livePosts.stream().map(p -> (String) p.get("username")).collect(Collectors.toSet());
@@ -338,6 +335,7 @@ public class SocialController {
     @GetMapping("/post/my-posts")
     public ResponseEntity<?> getMyPosts(@RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "20") int size, @RequestAttribute("userId") Long userId) {
         try {
+            size = Math.min(Math.max(size, 1), 50); page = Math.max(page, 0);
             String sql = "SELECT id, title, content, media_url AS \"mediaUrl\", media_type AS \"mediaType\", score, comment_count AS \"commentCount\", created_at AS \"createdAt\", user_id AS \"userId\", username FROM posts WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?";
             List<Map<String, Object>> livePosts = jdbcTemplate.queryForList(sql, userId, size, page * size);
             if (!livePosts.isEmpty()) {
@@ -369,6 +367,9 @@ public class SocialController {
     @PostMapping(value = "/user/profile/upload-and-update", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<?> uploadAndUpdateProfile(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username, @RequestParam("file") MultipartFile file) {
         try {
+            if (file == null || file.isEmpty() || file.getContentType() == null || !file.getContentType().startsWith("image/") || file.getSize() > 8L * 1024 * 1024) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Profile picture must be an image under 8 MB."));
+            }
             redisTemplate.opsForValue().set("user:id_to_name:" + userId, username.trim().toLowerCase(), java.time.Duration.ofDays(30));
             Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
             String newPicUrl = (String) blobResponse.get("mediaUrl");
@@ -384,6 +385,8 @@ public class SocialController {
     @PostMapping(value = "/post/upload-and-create", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<?> uploadAndCreatePost(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username, @RequestParam("file") MultipartFile file, @RequestParam("title") String title, @RequestParam("content") String content, @RequestParam("cityName") String cityName, @RequestParam("country") String country) {
         try {
+            String denied = validateNewPost(userId, file, title, content, cityName, country);
+            if (denied != null) return ResponseEntity.badRequest().body(Map.of("error", denied));
             redisTemplate.opsForValue().set("user:id_to_name:" + userId, username.trim().toLowerCase(), java.time.Duration.ofDays(30));
             Map<String, Object> blobResponse = blobClient.uploadMedia(file, String.valueOf(userId));
             Post post = new Post();
@@ -438,8 +441,9 @@ public class SocialController {
             String cleanName = username.trim().toLowerCase();
             try {
                 List<Map<String, Object>> remoteUser = userCatalogClient.searchUsersByHandle(cleanName);
-                if (remoteUser != null && !remoteUser.isEmpty()) {
-                    Map<String, Object> safeProfile = new HashMap<>(remoteUser.get(0));
+                Map<String, Object> exactUser = SafeUsers.exact(remoteUser, cleanName);
+                if (exactUser != null) {
+                    Map<String, Object> safeProfile = new HashMap<>(exactUser);
                     if (safeProfile.get("profilePictureUrl") != null) {
                         redisTemplate.opsForValue().set("user:avatar:" + cleanName, safeProfile.get("profilePictureUrl"), java.time.Duration.ofHours(24));
                     }
@@ -490,22 +494,109 @@ public class SocialController {
         }
     }
 
-    @PostMapping("/stripe/webhook")
-    public ResponseEntity<String> processStripeWebhook(@RequestBody(required = false) String payload) {
-        log.info("📥 Stripe Webhook payload arrived at processing gate.");
-        Long targetTravelerId = 16L;
-        profileCacheService.upgradeUserToPremiumTier(targetTravelerId);
-        userCatalogClient.upgradeInternalUserToPremium(targetTravelerId);
+    // ---- moderation helpers -------------------------------------------------------------------------------------
+    /** Posts reported by 3 or more different users are hidden from every feed until a human reviews them. */
+    private static final String NOT_FLAGGED = " AND (SELECT COUNT(DISTINCT sa.reporter_id) FROM safety_alerts sa WHERE sa.target_post_id = posts.id) < 3 ";
 
-        com.SocialService.Communities.DTOs.NotificationEvent paymentEvent =
-                com.SocialService.Communities.DTOs.NotificationEvent.builder()
-                        .type("PREMIUM_UNLOCK")
-                        .title("💎 PREMIUM STATUS ACTIVE")
-                        .message("Payment verified cleanly! Your account has been upgraded to Premium Tier. Shadow rooms and AI processing are unlocked.")
-                        .timestamp(java.time.LocalDateTime.now())
-                        .build();
+    /** Simple per-user counter limit. Returns false when the limit is exceeded. */
+    private boolean allow(String key, int max, java.time.Duration window) {
+        try {
+            Long n = redisTemplate.opsForValue().increment(key);
+            if (n != null && n == 1L) redisTemplate.expire(key, window);
+            return n == null || n <= max;
+        } catch (Exception e) {
+            return true;   // never block users because Redis hiccuped
+        }
+    }
 
-        notificationRegistryService.sendDirectNotification(targetTravelerId, paymentEvent);
-        return ResponseEntity.ok("Webhook processed cleanly.");
+    private String validateNewPost(Long userId, MultipartFile file, String title, String content, String cityName, String country) {
+        if (file == null || file.isEmpty()) return "A photo or video is required.";
+        if (file.getSize() > 50L * 1024 * 1024) return "Media file is too large (max 50 MB).";
+        String ct = file.getContentType();
+        if (ct == null || !(ct.startsWith("image/") || ct.startsWith("video/"))) return "Only photos and videos can be uploaded.";
+        if (title == null || title.isBlank() || title.length() > 20) return "Title must be 1-20 characters.";
+        if (content == null || content.isBlank() || content.length() > 100) return "Description must be 1-100 characters.";
+        if (cityName == null || cityName.isBlank() || cityName.length() > 50 || country == null || country.length() > 50) return "Please choose a valid city.";
+        Integer known = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM radar_cities WHERE LOWER(city_name) = LOWER(?)", Integer.class, cityName.trim());
+        if (known == null || known == 0) return "Unknown city.";
+        String promo = PromoFilter.check(title);
+        if (promo == null) promo = PromoFilter.check(content);
+        if (promo != null) return promo;
+        if (!allow("rl:post:" + userId, 20, java.time.Duration.ofHours(24))) return "Daily post limit reached (20). Try again tomorrow.";
+        return null;
+    }
+
+    /**
+     * Account deletion (Google Play requirement). Removes everything the user created, then the account itself.
+     * Runs in one transaction: if the final account-deletion call fails, everything rolls back and the user can simply retry.
+     */
+    @DeleteMapping("/user/me")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> deleteMyAccount(@RequestAttribute("userId") Long userId, @RequestAttribute("username") String username) {
+        final String name = username.trim().toLowerCase();
+        try {
+            // 1. media files of own posts + avatar
+            List<Map<String, Object>> own = jdbcTemplate.queryForList("SELECT id, city_name, media_url FROM posts WHERE user_id = ?", userId);
+            for (Map<String, Object> p : own) {
+                Object url = p.get("media_url");
+                if (url != null && url.toString().contains("/stream/")) {
+                    try { blobClient.deleteMedia(url.toString().substring(url.toString().lastIndexOf('/') + 1)); } catch (Exception ignored) { }
+                }
+            }
+            try {
+                Map<String, Object> me = SafeUsers.exact(userCatalogClient.searchUsersByHandle(name), name);
+                Object av = me == null ? null : me.get("profilePictureUrl");
+                if (av != null && av.toString().contains("/stream/")) {
+                    blobClient.deleteMedia(av.toString().substring(av.toString().lastIndexOf('/') + 1));
+                }
+            } catch (Exception ignored) { }
+
+            // 2. posts this user touched on OTHER people's posts (to recompute counters afterwards)
+            List<Long> touched = new ArrayList<>(jdbcTemplate.queryForList(
+                    "SELECT post_id FROM post_upvotes WHERE user_id = ? UNION SELECT post_id FROM post_downvotes WHERE user_id = ? UNION SELECT post_id FROM comments WHERE user_id = ?",
+                    Long.class, userId, userId, userId));
+
+            // 3. own posts and everything attached to them
+            String ownIds = "(SELECT id FROM posts WHERE user_id = ?)";
+            jdbcTemplate.update("DELETE FROM comment_reports WHERE target_comment_id IN (SELECT id FROM comments WHERE post_id IN " + ownIds + ")", userId);
+            jdbcTemplate.update("DELETE FROM comments WHERE post_id IN " + ownIds, userId);
+            jdbcTemplate.update("DELETE FROM post_upvotes WHERE post_id IN " + ownIds, userId);
+            jdbcTemplate.update("DELETE FROM post_downvotes WHERE post_id IN " + ownIds, userId);
+            jdbcTemplate.update("DELETE FROM safety_alerts WHERE target_post_id IN " + ownIds, userId);
+            jdbcTemplate.update("DELETE FROM posts WHERE user_id = ?", userId);
+
+            // 4. own comments / votes / reports on other people's content
+            jdbcTemplate.update("UPDATE comments SET parent_id = NULL WHERE parent_id IN (SELECT id FROM comments WHERE user_id = ?)", userId);
+            jdbcTemplate.update("DELETE FROM comment_reports WHERE target_comment_id IN (SELECT id FROM comments WHERE user_id = ?)", userId);
+            jdbcTemplate.update("DELETE FROM comments WHERE user_id = ?", userId);
+            jdbcTemplate.update("DELETE FROM post_upvotes WHERE user_id = ?", userId);
+            jdbcTemplate.update("DELETE FROM post_downvotes WHERE user_id = ?", userId);
+            jdbcTemplate.update("DELETE FROM safety_alerts WHERE reporter_id = ?", userId);
+            jdbcTemplate.update("DELETE FROM comment_reports WHERE reporter_id = ?", userId);
+            jdbcTemplate.update("DELETE FROM peer_vouches WHERE voucher_id = ? OR target_user_id = ?", userId, userId);
+
+            // 5. recompute counters on the posts that remain
+            for (Long postId : touched) {
+                jdbcTemplate.update("UPDATE posts SET score = (SELECT COUNT(*) FROM post_upvotes WHERE post_id = ?) - (SELECT COUNT(*) FROM post_downvotes WHERE post_id = ?), comment_count = (SELECT COUNT(*) FROM comments WHERE post_id = ?) WHERE id = ?", postId, postId, postId, postId);
+            }
+
+            // 6. caches
+            try {
+                for (Map<String, Object> p : own) {
+                    redisTemplate.delete("post:object:" + p.get("id"));
+                    redisTemplate.opsForZSet().remove("feed:city:" + String.valueOf(p.get("city_name")).toLowerCase().replace(" ", "_"), p.get("id").toString());
+                }
+                redisTemplate.delete(java.util.List.of("user:id_to_name:" + userId, "user:avatar:" + name, "user:strikers:" + name, "user:profile:" + userId, "dp:v1:" + name));
+            } catch (Exception ignored) { }
+
+            // 7. the account itself (user-catalog service). Throws on failure -> transaction rolls back -> user retries.
+            userCatalogClient.deleteInternalUser(name);
+            log.warn("Account deleted: @{}", name);
+            return ResponseEntity.ok(Map.of("status", "SUCCESS"));
+        } catch (Exception e) {
+            log.error("Account deletion failed for @{}", name, e);
+            org.springframework.transaction.interceptor.TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Could not delete the account right now. Please try again."));
+        }
     }
 }
